@@ -313,16 +313,15 @@ function layout(){
        pixels réels, pas en unités virtuelles. */
     const sc = Math.min(window.innerWidth / VW, window.innerHeight / VH);
     L.btnW = pw; L.btnX = L.panelX + 12;
-    L.btnH = Math.round(clamp(46 / sc, 76, 140));
+    L.btnH = Math.round(clamp(50 / sc, 76, 150));
     L.btnY = VH - 12 - L.btnH * 2 - 10;
-    L.minDie = Math.round(clamp(46 / sc, 50, 160));
     const nP = Math.max(2, (G.players && G.players.length) || 3);
-    const reserve = 72 + 12 + 34 + Math.round(L.minDie * 2.45) + 14 + (VH - L.btnY);
-    L.rowH = clamp(Math.floor((VH - reserve) / nP), 58, 120);
+    L.rowH = clamp(Math.round((VH * .26) / nP), 52, 88);
     const top = 72 + nP * L.rowH + 12;
-    const diceTop = top + 34, diceBot = L.btnY - 14;
+    const diceTop = top + 40, diceBot = L.btnY - 14;
     const rowSp = (diceBot - diceTop) / 2;
-    DSZ_TRAY = Math.max(L.minDie, Math.min(Math.round(rowSp * .84), Math.round(pw / 3.3), 210));
+    DSZ_TRAY = Math.max(Math.round(clamp(46 / sc, 50, 160)),
+                        Math.min(Math.round(rowSp * .84), Math.round(pw / 3.3), 210));
     L.diceZone = {x:L.panelX + 12, y:diceTop, w:pw, h:diceBot - diceTop};
     L.diceCells = [];
     const cx = L.panelX + L.panelW / 2, colSp = DSZ_TRAY * 1.08;
@@ -377,15 +376,11 @@ const G = {
      annule le gain. Mieux vaut peu de candidats et beaucoup de simulations.
    - une deuxième relance simulée en profondeur dégrade le jeu, pour la même
      raison. On reste à un niveau, avec 70 simulations par candidat.
-   - moduler la prudence selon l'avance au score, et viser en priorité le
-     joueur qui mène, se sont révélés sans effet mesurable.
-   Le niveau Difficile n'utilise plus de simulation du tout : il résout
-   exactement l'arbre des trois lancers (voir EXPECTIMAX EXACT). */
+   - moduler la prudence selon l'avance au score s'est révélé contre-productif. */
 const LEVELS = [
   {name:'Facile',    sims:3,  deny:.10, noise:.55, smart:false, exact:false, menace:0, sloppy:.45},
   {name:'Normal',    sims:20, deny:.55, noise:.10, smart:true,  exact:false, menace:.70, oppint:false, endw:.5},
-  {name:'Difficile', sims:70, deny:.90, noise:0,   smart:true,  exact:true,  menace:.85, oppint:true,  endw:.5,
-   expectimax:true, bonusVal:2.5}
+  {name:'Difficile', sims:70, deny:.90, noise:0,   smart:true,  exact:true,  menace:.85, oppint:true,  endw:.5}
 ];
 /* le niveau est porté par le joueur : permet de faire s'affronter deux IA */
 function LV(){
@@ -718,7 +713,7 @@ function pending(p, motif){
 function slotValue(slot, p, info){
   const L = LV();
   if (!G.ctx) refreshCtx();
-  if (slot === G.bonus) return L.smart ? (L.bonusVal === undefined ? 4.3 : L.bonusVal) : 3.4;
+  if (slot === G.bonus) return L.smart ? 4.3 : 3.4;
   const c = slot.card;
 
   if (!L.smart){                                   /* niveau Facile : vue courte */
@@ -850,195 +845,6 @@ function evalHand(vals, p, bonusVal){
   return best;
 }
 
-/* =======================================================================
-   EXPECTIMAX EXACT (niveau Difficile)
-   Au lieu d'estimer par simulation la valeur d'une conservation, on la
-   calcule exactement. Une main de 5 dés n'a que 252 formes distinctes et
-   462 sous-ensembles possibles : les lois de probabilité de relance sont
-   donc tabulées une fois pour toutes au chargement. Ensuite, pour un
-   tableau donné, on évalue les 252 mains puis on remonte l'arbre des
-   lancers par espérance exacte — plus aucun bruit d'échantillonnage, et
-   la décision de garde est optimale au regard de la fonction d'évaluation.
-   ======================================================================= */
-const EX = {ready:false, hands:[], idx:new Map(), subs:[], trans:new Map(), ms:{}};
-function msKey(a){ let k = a.length; for (let i = 0; i < a.length; i++) k = k * 7 + a[i]; return k; }
-function multisets(n){
-  if (EX.ms[n]) return EX.ms[n];
-  const out = [];
-  (function rec(start, cur){
-    if (cur.length === n){ out.push(cur.slice()); return; }
-    for (let v = start; v <= 6; v++){ cur.push(v); rec(v, cur); cur.pop(); }
-  })(1, []);
-  EX.ms[n] = out;
-  return out;
-}
-function initExact(){
-  const f = [1, 1, 2, 6, 24, 120];
-  EX.hands = multisets(5);
-  EX.hands.forEach((h, i) => EX.idx.set(msKey(h), i));
-  for (let k = 0; k <= 5; k++){
-    const r = 5 - k, pool = multisets(r);
-    for (const K of multisets(k)){
-      const idxs = [], ps = [];
-      for (const R of pool){
-        const c = [0,0,0,0,0,0,0];
-        for (const v of R) c[v]++;
-        let ways = f[r];
-        for (let v = 1; v <= 6; v++) ways /= f[c[v]];
-        const full = K.concat(R).sort((a, b) => a - b);
-        idxs.push(EX.idx.get(msKey(full)));
-        ps.push(ways / Math.pow(6, r));
-      }
-      EX.trans.set(msKey(K), {i:Int16Array.from(idxs), p:Float64Array.from(ps)});
-    }
-  }
-  EX.subs = EX.hands.map(h => {
-    const seen = new Set(), out = [];
-    for (let m = 0; m < 32; m++){
-      const sub = [];
-      for (let i = 0; i < 5; i++) if (m & (1 << i)) sub.push(h[i]);
-      const kk = msKey(sub);
-      if (!seen.has(kk)){ seen.add(kk); out.push({k:kk, m}); }
-    }
-    return out;
-  });
-  EX.ready = true;
-}
-
-/* ---- évaluateur rapide d'une main pour un tableau donné ----
-   Les combinaisons capables de revendiquer chaque carte sont énumérées une
-   fois par tour (une carte Simple en accepte 5, un brelan 6, une suite 4),
-   puis indexées par forme de main : évaluer une main revient alors à 31
-   consultations de table au lieu de 372 tests de règle. */
-const FE = {pat:null, bonusOk:false, bonusMin:0, bonusVal:4.3, slots:[]};
-function patternsForSlot(s){
-  const c = s.card.combo, cur = s.claim, out = [];
-  if (c.k === 'simple'){
-    for (let n = (cur ? cur.dice.length + 1 : 1); n <= 5; n++) out.push(new Array(n).fill(c.face));
-  } else if (c.k === 'same'){
-    const minF = cur ? cur.dice[0].value : 0;
-    for (let v = minF + 1; v <= 6; v++) out.push(new Array(c.n).fill(v));
-  } else {
-    const st0 = cur ? Math.round((cur.sum - c.n * (c.n - 1) / 2) / c.n) : 0;
-    for (let st = st0 + 1; st <= 7 - c.n; st++){
-      const a = [];
-      for (let i = 0; i < c.n; i++) a.push(st + i);
-      out.push(a);
-    }
-  }
-  return out;
-}
-function prepEval(p){
-  const map = new Map();
-  FE.slots = [];
-  for (const s of G.slots){
-    if (!s.card || (s.claim && s.claim.pid === p.id)) continue;
-    let any = false;
-    for (const vals of patternsForSlot(s)){
-      const v = slotValue(s, p, infoOf(vals));
-      const kk = msKey(vals);
-      let l = map.get(kk);
-      if (!l){ l = []; map.set(kk, l); }
-      l.push({si:FE.slots.length, val:v});
-      any = true;
-    }
-    if (any) FE.slots.push(s);
-  }
-  FE.bonusOk = !p.rolledBonus && !(G.bonus.claim && G.bonus.claim.pid === p.id);
-  FE.bonusMin = G.bonus.claim ? G.bonus.claim.sum : 0;
-  FE.bonusVal = LV().smart ? (LV().bonusVal === undefined ? 4.3 : LV().bonusVal) : 3.4;
-  if (FE.bonusOk){
-    /* le dé bonus accepte n'importe quel groupe de dés dont le total dépasse
-       celui en place : on l'inscrit comme une case ordinaire pour que
-       l'affectation arbitre elle-même entre carte et dé bonus */
-    const bi = FE.slots.length;
-    let any = false;
-    for (let n = 1; n <= 5; n++)
-      for (const vals of multisets(n)){
-        let sm = 0;
-        for (const v of vals) sm += v;
-        if (sm <= FE.bonusMin) continue;
-        const kk = msKey(vals);
-        let l = map.get(kk);
-        if (!l){ l = []; map.set(kk, l); }
-        l.push({si:bi, val:FE.bonusVal});
-        any = true;
-      }
-    if (any) FE.slots.push(G.bonus);
-  }
-  FE.pat = map;
-}
-const FEV = new Float64Array(16 * 32), FEU = new Int32Array(16 * 32), FES = new Int32Array(16 * 32);
-let feStamp = 0;
-function fastEval(hand){
-  const opts = [];
-  for (let m = 1; m < 32; m++){
-    const sub = [];
-    for (let i = 0; i < 5; i++) if (m & (1 << i)) sub.push(hand[i]);
-    const l = FE.pat.get(msKey(sub));
-    if (l) for (const o of l) opts.push({si:o.si, mask:m, val:o.val});
-  }
-  const n = FE.slots.length;
-  const bySlot = [];
-  for (let i = 0; i < n; i++) bySlot.push(null);
-  for (const o of opts){ if (!bySlot[o.si]) bySlot[o.si] = []; bySlot[o.si].push(o); }
-  const order = [];
-  for (let i = 0; i < n; i++) if (bySlot[i]) order.push(bySlot[i]);
-  feStamp++;
-  const rec = (i, used) => {
-    if (i >= order.length) return 0;
-    const key = i * 32 + used;
-    if (FES[key] === feStamp){ return FEV[key]; }
-    let bv = rec(i + 1, used), bu = FEU[(i + 1) * 32 + used] | 0;
-    if (i + 1 >= order.length) bu = used;
-    for (const o of order[i]){
-      if (o.mask & used) continue;
-      const sub = rec(i + 1, used | o.mask);
-      const v = sub + o.val;
-      if (v > bv){ bv = v; bu = (i + 1 >= order.length) ? (used | o.mask) : FEU[(i + 1) * 32 + (used | o.mask)]; }
-    }
-    FES[key] = feStamp; FEV[key] = bv; FEU[key] = bu;
-    return bv;
-  };
-  return rec(0, 0);
-}
-
-/* ---- politique de garde optimale ---- */
-const EXP = {V3:new Float64Array(252), W1:new Float64Array(252), ok:false};
-function buildPolicy(p){
-  if (!EX.ready) initExact();
-  prepEval(p);
-  for (let h = 0; h < 252; h++) EXP.V3[h] = fastEval(EX.hands[h]);
-  for (let h = 0; h < 252; h++){
-    let best = -1e18;
-    for (const sub of EX.subs[h]){
-      const t = EX.trans.get(sub.k);
-      let e = 0;
-      for (let j = 0; j < t.i.length; j++) e += t.p[j] * EXP.V3[t.i[j]];
-      if (e > best) best = e;
-    }
-    EXP.W1[h] = best;
-  }
-  EXP.ok = true;
-}
-function exactKeep(vals, rollsLeft){
-  const order = vals.map((v, i) => i).sort((a, b) => vals[a] - vals[b]);
-  const hand = order.map(i => vals[i]);
-  const h = EX.idx.get(msKey(hand));
-  if (h === undefined) return null;
-  const table = rollsLeft > 1 ? EXP.W1 : EXP.V3;
-  let best = -1e18, bm = 0;
-  for (const sub of EX.subs[h]){
-    const t = EX.trans.get(sub.k);
-    let e = 0;
-    for (let j = 0; j < t.i.length; j++) e += t.p[j] * table[t.i[j]];
-    if (e > best){ best = e; bm = sub.m; }
-  }
-  let mask = 0;                                  /* retour aux dés réels */
-  for (let i = 0; i < 5; i++) if (bm & (1 << i)) mask |= 1 << order[i];
-  return mask;
-}
-
 /* candidats de conservation entre deux lancers */
 function keepCandidates(vals){
   const n = vals.length;
@@ -1061,13 +867,8 @@ function keepCandidates(vals){
 }
 /* Quels dés garder entre deux lancers : on simule le reste du tour pour
    chaque conservation candidate et on retient la meilleure espérance. */
-function aiKeepMask(p, vals, isB, rollsLeft){
-  const L = LV();
-  if (L.expectimax && vals.length === 5 && !(isB && isB.some(Boolean))){
-    const m = exactKeep(vals, rollsLeft === undefined ? 1 : rollsLeft);
-    if (m !== null) return m;
-  }
-  const cands = keepCandidates(vals);
+function aiKeepMask(p, vals, isB){
+  const L = LV(), cands = keepCandidates(vals);
   const hasB = !!(isB && isB.some(Boolean));
   const sims = hasB ? Math.max(6, Math.round(L.sims / 2)) : L.sims;
   let best = 0, bestV = -1e9;
@@ -1375,17 +1176,14 @@ async function doRoll(p){
     act.push(G.bonus.bd);
     await moveDie(G.bonus.bd, bonusTrayPos(p).x, bonusTrayPos(p).y, .4, 60, DSZ_TRAY);
   }
-  if (p.isAI){
-    if (LV().expectimax && p.active === 5 && !p.hasBonus) buildPolicy(p);
-    await wait(300);
-  }
+  if (p.isAI) await wait(300);
   await rollSome(p, act);
   G.rollsLeft--;
   while (G.rollsLeft > 0){
     if (p.isAI){
       await wait(340);
       const vals = act.map(d => d.value);
-      const mask = aiKeepMask(p, vals, act.map(d => !!d.isBonus), G.rollsLeft);
+      const mask = aiKeepMask(p, vals, act.map(d => !!d.isBonus));
       act.forEach((d, i) => d.lock = !!(mask & (1 << i)));
       const toRoll = act.filter(d => !d.lock);
       if (!toRoll.length) break;
@@ -1873,11 +1671,9 @@ function drawTopBar(){
   let label = '', sub = '';
   if (G.state === 'play'){
     if (G.phase === 'ROLL')    { label = p.isAI ? p.name + ' lance les dés' : 'À vous de jouer';
-                                 sub = 'Lancer ' + (4 - G.rollsLeft - 1) + '/3 — ' +
-                                       (MOB ? 'touchez' : 'cliquez') + ' un dé pour le garder'; }
+                                 sub = 'Lancer ' + (4 - G.rollsLeft - 1) + '/3 — cliquez un dé pour le garder'; }
     else if (G.phase === 'CLAIM'){ label = p.isAI ? p.name + ' revendique' : 'Revendication';
-                                 sub = MOB ? 'Touchez une carte pour poser · à nouveau pour annuler'
-                                           : 'Cliquez une carte pour poser · re-cliquez pour annuler'; }
+                                 sub = 'Cliquez une carte pour poser · re-cliquez pour annuler'; }
     else if (G.phase === 'BONUS'){ label = 'Dé bonus'; sub = 'Alignez un dé sur le bonus, ou passez'; }
     else if (G.phase === 'RECLAIM'){ label = p.name + ' récupère ses dés'; sub = ''; }
     if (p.isAI) sub = 'Tour de ' + p.name;
@@ -1983,8 +1779,8 @@ function drawPanel(){
   CX.restore();
 
   if (MOB){
-    txt('JOUEURS', L.panelX + 14, 42, 12, PAL.ink2, 'left', '700');
-    txt('Tour ' + G.turnCount, L.panelX + L.panelW - 14, 42, 12, PAL.ink2, 'right', '600');
+    txt('JOUEURS', L.panelX + 14, 40, 11, PAL.ink2, 'left', '700');
+    txt('Tour ' + G.turnCount, L.panelX + L.panelW - 14, 40, 11, PAL.ink2, 'right', '600');
     for (const p of G.players){
       const r = panelRow(p.id), active = p.id === G.current && G.state === 'play';
       const sc = scoreOf(p);
@@ -1993,41 +1789,28 @@ function drawPanel(){
       rr(r.x, r.y, r.w, r.h, 11); CX.fill();
       CX.strokeStyle = active ? PAL.orange : PAL.line; CX.lineWidth = active ? 2 : 1; CX.stroke();
       CX.fillStyle = p.hex;
-      CX.beginPath(); CX.arc(r.x + 20, ny, 10, 0, 6.3); CX.fill();
+      CX.beginPath(); CX.arc(r.x + 20, r.y + r.h * .32, 10, 0, 6.3); CX.fill();
       CX.restore();
-      const ny = r.y + r.h * .26;
-      const fName = clamp(r.h * .25, 11, 16), fScore = clamp(r.h * .36, 15, 24);
-      txt(p.name, r.x + 38, ny, fName, active ? PAL.ink : '#cfc9b4', 'left', '700');
+      txt(p.name, r.x + 38, r.y + r.h * .32, 13, active ? PAL.ink : '#cfc9b4', 'left', '700');
       let ix = r.x + r.w - 12;
-      txt(sc.total, ix, ny, fScore, PAL.orange, 'right', '800');
+      txt(sc.total, ix, r.y + r.h * .32, 17, PAL.orange, 'right', '800');
       if (sc.hasJoker || G.bonus.holder === p.id || (G.bonus.claim && G.bonus.claim.pid === p.id)){
         const tag = sc.hasJoker ? 'J' : 'B';
-        const ty = r.h < 74 ? r.y + r.h * .78 : ny;
-        if (r.h >= 74) ix -= 40 * TS;
+        ix -= 34 * TS;
         CX.save(); CX.fillStyle = sc.hasJoker ? PAL.cream : '#fff';
-        CX.beginPath(); CX.arc(r.h < 74 ? r.x + r.w - 20 : ix, ty, 11, 0, 6.3); CX.fill(); CX.restore();
-        txt(tag, r.h < 74 ? r.x + r.w - 20 : ix, ty, 13, '#101b1c', 'center', '800');
+        CX.beginPath(); CX.arc(ix, r.y + r.h * .32, 9, 0, 6.3); CX.fill(); CX.restore();
+        txt(tag, ix, r.y + r.h * .32, 11, '#101b1c', 'center', '800');
       }
-      /* compteurs par motif : le nombre de cartes en gros, le bonus de série
-         en petit dans le coin. À quatre joueurs la ligne est trop basse pour
-         deux étages : on les remet alors sur la même ligne que le nom, sans
-         le bonus, plutôt que de tout tasser. */
-      const tight = r.h < 74;
-      const cx0 = tight ? r.x + r.w * .34 : r.x + 10;
-      const span = tight ? r.w * .50 : r.w - 20;
-      const cw2 = span / 4, chH = tight ? r.h * .58 : Math.min(46, r.h * .42);
-      const cy = tight ? ny : r.y + r.h * .74;
+      const cw2 = (r.w - 24) / 4, cy = r.y + r.h * .72;
       for (let m = 0; m < 4; m++){
-        const x = cx0 + m * cw2, w2 = cw2 - 6, n = sc.counts[m];
+        const x = r.x + 12 + m * cw2;
         CX.save();
-        CX.globalAlpha = n ? 1 : .24;
+        CX.globalAlpha = sc.counts[m] ? 1 : .26;
         CX.fillStyle = MOTIF_COL[m];
-        rr(x, cy - chH/2, w2, chH, 7); CX.fill();
+        rr(x, cy - 10, cw2 - 6, 21, 6); CX.fill();
         CX.restore();
-        txt(n, x + w2 / 2, cy, clamp(chH * (tight ? .52 : .44), 11, 19), '#101b1c', 'center', '800');
-        if (!tight && n >= 2)
-          txt('+' + serieBonus(n), x + w2 - 5, cy + chH/2 - chH * .17,
-              clamp(chH * .27, 8, 13), 'rgba(16,27,28,.72)', 'right', '800');
+        txt(sc.counts[m] + (sc.counts[m] >= 2 ? '·' + serieBonus(sc.counts[m]) : ''),
+            x + (cw2 - 6) / 2, cy, 10, '#121c1d', 'center', '800');
       }
     }
     return;
@@ -2368,7 +2151,7 @@ function tipContent(slot){
                              : 'Revendiquée par ' + o.name + ' avec ' + dv + '.', o.hex);
     if (slot.claim.pid === 0){
       add('Elle est à vous au début de votre prochain tour si personne ne vous déloge d\'ici là.', '#79dd8c');
-      if (canUndo(slot)) add((MOB ? 'Touchez' : 'Cliquez') + ' la carte pour reprendre vos dés.', PAL.cream, 13, '700');
+      if (canUndo(slot)) add('Cliquez la carte pour reprendre vos dés.', PAL.cream, 13, '700');
     }
     else if (k.k === 'simple')
       add('Pour la déloger : au moins ' + (slot.claim.dice.length + 1) + ' dés affichant ' + k.face + '.', PAL.ink);
@@ -2632,7 +2415,6 @@ G.bonus = {idx:'bonus', cell:0, x:800, y:400, claim:null, holder:-1, glow:0,
 G.hl = {ok:new Set(), any:new Set()};
 resize();
 initThreat();
-initExact();
 loadAssets();
 requestAnimationFrame(frame);
 </script>
