@@ -1557,6 +1557,7 @@ const PIPS = {
   6:[[-1,-1],[1,-1],[-1,0],[1,0],[-1,1],[1,1]]
 };
 const FALLBACK_DIE = ['#1e8ba6','#cf2b3c','#7d3b8f','#6f9c3a','#20262a','#7a4a28','#f2efe4'];
+const LAST_RED = '#e8402c';                    /* dernière carte d'une pile */
 
 function drawDieFace(v, col, s){
   const dark = col === '#f2efe4';
@@ -1775,6 +1776,21 @@ function drawSlot(s){
     rr(s.x - bw/2, s.y + h/2 + 6, bw, bh, bh/2); CX.fill();
     txt(label + ' carte' + (label > 1 ? 's' : ''), s.x, s.y + h/2 + 6 + bh/2,
         raw(Math.max(14, w * .105)), PAL.ink2, 'center', '600');
+    CX.restore();
+  } else if (s.card && !s.joker){
+    /* plus rien sous cette carte : l'encaisser met fin à la partie */
+    const pulse = .5 + Math.sin(performance.now() / 430) * .5;
+    CX.save();
+    CX.globalAlpha = .7 + pulse * .3;
+    CX.strokeStyle = LAST_RED; CX.lineWidth = Math.max(4, w * .034);
+    rr(s.x - w/2 + 2, s.y - h/2 + 2, w - 4, h - 4, 8); CX.stroke();
+    CX.restore();
+    const bw = Math.max(96, w * .78), bh = Math.max(25, w * .15);
+    CX.save();
+    CX.fillStyle = LAST_RED;
+    rr(s.x - bw/2, s.y + h/2 + 6, bw, bh, bh/2); CX.fill();
+    txt('DERNIÈRE CARTE', s.x, s.y + h/2 + 6 + bh/2,
+        raw(Math.max(13, w * .088)), '#fff3ee', 'center', '800');
     CX.restore();
   }
   if (s.joker && s.card){
@@ -2125,10 +2141,15 @@ function drawParts(){
 /* Empreinte numérique de tout ce dont dépendent les surbrillances. Sans elle,
    on recalculait toutes les combinaisons possibles à chaque image, soit
    quelques centaines d'objets par seconde jetés au ramasse-miettes. */
+const PHASE_ID = {RECLAIM:1, ROLL:2, BONUS:3, CLAIM:4};
 function hlSig(){
   const p = G.players[G.current];
   if (!p) return 0;
-  let n = (G.state === 'play' ? 1 : 2) * 31 + G.phase.length * 7 + G.current * 13;
+  /* la phase est codée par un identifiant propre : « BONUS » et « CLAIM »
+     ayant le même nombre de lettres, coder la longueur rendait le passage
+     de l'une à l'autre invisible, et les surbrillances restaient vides */
+  let n = (G.state === 'play' ? 1 : 2) * 31 + (PHASE_ID[G.phase] || 0) * 7 + G.current * 13;
+  n = (n * 3 + (p.rolledBonus ? 5 : 0)) | 0;
   for (let i = 0; i < p.active; i++){
     const d = p.dice[i];
     n = (n * 31 + d.value + (d.at ? 97 : 0) + (d.sel ? 11 : 0)) | 0;
@@ -2256,6 +2277,7 @@ function drawHelp(){
     'Déloger une carte Simple : il faut poser strictement plus de dés.',
     'Dé bonus : posez-y des dés inutilisés. Le total le plus élevé l\'emporte.',
     'En fin de tour, vos dés restants y sont placés automatiquement si c\'est possible.',
+    'Une carte cerclée de rouge est la dernière de sa pile : l\'encaisser termine la partie.',
     'Le joker s\'ajoute à la série de votre choix (moins de 12 cartes) pour gonfler le bonus.',
     'Bonus de série : 2→3, 3→6, 4→10, 5→15, 6→21, 7→28, 8→36, 9→45, 10→55, 11→66, 12→78.'
   ];
