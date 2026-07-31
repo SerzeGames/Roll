@@ -35,6 +35,18 @@ const HINT = document.getElementById('hint');
    plus de bandes noires, et tout le dessin occupe l'écran réel. */
 let VW = 1600, VH = 900;
 let SC = 1, OX = 0, OY = 0, DPR = 1, MOB = false;
+/* Zoom tactile maison : plutôt que de laisser le navigateur agrandir des
+   pixels déjà rendus (donc flous), on redessine la scène à l'échelle
+   demandée. Deux doigts pour zoomer, un doigt pour se déplacer une fois
+   zoomé, et un bouton 1:1 pour revenir. */
+const Z = {k:1, x:0, y:0};
+function clampZoom(){
+  const w = window.innerWidth, h = window.innerHeight;
+  const cw = VW * SC * Z.k, ch = VH * SC * Z.k;
+  Z.x = cw >= w ? clamp(OX + Z.x, w - cw, 0) - OX : (w - cw) / 2 - OX;
+  Z.y = ch >= h ? clamp(OY + Z.y, h - ch, 0) - OY : (h - ch) / 2 - OY;
+}
+function resetZoom(){ Z.k = 1; Z.x = 0; Z.y = 0; }
 
 function resize(){
   const w = window.innerWidth, h = window.innerHeight;
@@ -52,6 +64,7 @@ function resize(){
   SC = Math.min(w / VW, h / VH);
   TS = MOB ? clamp(.95 / SC, 1, 2.6) : 1;
   OX = (w - VW * SC) / 2; OY = (h - VH * SC) / 2;
+  resetZoom();
   CX.setTransform(dpr, 0, 0, dpr, 0, 0);
   if (G.state === 'play') repositionAll();
 }
@@ -366,7 +379,7 @@ const G = {
   current:0, round:1, turnCount:0,
   rollsLeft:0, over:false, sound:true,
   nbPlayers:3, level:1,    /* 0 facile 1 normal 2 difficile */
-  log:[], hitBtns:[], flying:[], msg:'', cellCount:11, jokerCell:8, bonusCell:5,
+  log:[], hitBtns:[], flying:[], msg:'', cellCount:11, jokerCell:8, bonusCell:5, zoomBtn:null,
   uiResolve:null, endReason:'',
   busy:false, hover:null, showHelp:false, hl:null, hlSig:null,
   tipSlot:null, tipT:0, tipForce:false, mouse:{x:0,y:0}, undoStack:[]
@@ -2469,7 +2482,27 @@ function draw(){
 /* =======================================================================
    ENTREES
    ======================================================================= */
-function toV(e){ return {x:(e.clientX - OX) / SC, y:(e.clientY - OY) / SC}; }
+function drawZoomBtn(){
+  G.zoomBtn = null;
+  if (Z.k <= 1.02) return;
+  const s = 52, x = 14, y = window.innerHeight - s - 14;
+  CX.save();
+  CX.setTransform(DPR, 0, 0, DPR, 0, 0);
+  CX.globalAlpha = .92;
+  CX.fillStyle = 'rgba(10,20,21,.9)';
+  rr(x, y, s, s, 14); CX.fill();
+  CX.strokeStyle = PAL.orange; CX.lineWidth = 2; CX.stroke();
+  CX.fillStyle = PAL.cream;
+  CX.font = "700 17px 'Trebuchet MS',sans-serif";
+  CX.textAlign = 'center'; CX.textBaseline = 'middle';
+  CX.fillText('1:1', x + s/2, y + s/2 - 6);
+  CX.font = "700 11px 'Trebuchet MS',sans-serif";
+  CX.fillStyle = PAL.ink2;
+  CX.fillText('×' + Z.k.toFixed(1), x + s/2, y + s/2 + 12);
+  CX.restore();
+  G.zoomBtn = {x, y, w:s, h:s};
+}
+function toV(e){ return {x:(e.clientX - OX - Z.x) / (SC * Z.k), y:(e.clientY - OY - Z.y) / (SC * Z.k)}; }
 function hitBtn(pt){
   for (const b of G.hitBtns)
     if (pt.x >= b.x && pt.x <= b.x + b.w && pt.y >= b.y && pt.y <= b.y + b.h) return b.id;
@@ -2548,7 +2581,8 @@ function onDie(p, d){
   }
 }
 
-function onDown(pt){
+function onDown(ev){
+  const pt = ev.clientX !== undefined ? toV(ev) : ev;
   const id = hitBtn(pt);
   if (id){ hideTip(); onButton(id); return; }
   if (G.showHelp){ G.showHelp = false; return; }
@@ -2574,19 +2608,92 @@ function onDown(pt){
   if (act && G.phase === 'CLAIM') p.dice.forEach(d => d.sel = false);
 }
 
-CV.addEventListener('pointermove', e => {
-  const pt = toV(e);
-  G.mouse = pt;
-  G.hover = hitBtn(pt);
-  const s = G.state === 'play' ? slotAt(pt) : null;
-  if (s !== G.tipSlot){ G.tipSlot = s; G.tipT = 0; G.tipForce = false; }
+const PTR = new Map();
+let pinch = null, gesture = null;
+function hitZoomBtn(e){
+  const b = G.zoomBtn;
+  return b && e.clientX >= b.x && e.clientX <= b.x + b.w && e.clientY >= b.y && e.clientY <= b.y + b.h;
+}
+function startPinch(){
+  const v = [...PTR.values()];
+  pinch = {d:Math.hypot(v[0].x - v[1].x, v[0].y - v[1].y), k:Z.k,
+           cx:(v[0].x + v[1].x) / 2, cy:(v[0].y + v[1].y) / 2, zx:Z.x, zy:Z.y};
+}
+function updatePinch(){
+  const v = [...PTR.values()];
+  const d = Math.hypot(v[0].x - v[1].x, v[0].y - v[1].y);
+  if (!pinch || pinch.d < 4) return;
+  const nk = clamp(pinch.k * (d / pinch.d), 1, 3.6), r = nk / pinch.k;
+  const cx = (v[0].x + v[1].x) / 2, cy = (v[0].y + v[1].y) / 2;
+  Z.k = nk;                                       /* le point pincé reste sous les doigts */
+  Z.x = cx - OX - (pinch.cx - OX - pinch.zx) * r;
+  Z.y = cy - OY - (pinch.cy - OY - pinch.zy) * r;
+  clampZoom();
+}
+CV.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  if (hitZoomBtn(e)){ resetZoom(); return; }
+  /* filet de sécurité : certains navigateurs mobiles perdent un pointerup,
+     ce qui bloquerait toutes les tapes suivantes */
+  const now = performance.now();
+  for (const [id, q] of PTR) if (now - q.t > 5000) PTR.delete(id);
+  PTR.set(e.pointerId, {x:e.clientX, y:e.clientY, sx:e.clientX, sy:e.clientY,
+                        t:performance.now(), moved:0, type:e.pointerType});
+  if (PTR.size === 2){ startPinch(); gesture = null; return; }
+  if (PTR.size > 2) return;
+  gesture = {id:e.pointerId, panned:false, multi:false};
+  /* souris et stylet agissent au clic ; le doigt attend le relâchement pour
+     ne pas jouer un coup au moment où l'on commence un pincement */
+  if (e.pointerType !== 'touch') onDown(toV(e));
 });
-CV.addEventListener('pointerdown', e => { e.preventDefault(); onDown(toV(e)); });
-CV.addEventListener('pointerleave', () => { G.hover = null; hideTip(); });
+CV.addEventListener('pointermove', e => {
+  const p = PTR.get(e.pointerId);
+  if (p){
+    const dx = e.clientX - p.x, dy = e.clientY - p.y;
+    p.moved += Math.hypot(dx, dy); p.x = e.clientX; p.y = e.clientY;
+    if (pinch && PTR.size >= 2){ updatePinch(); return; }
+    if (gesture && gesture.id === e.pointerId && Z.k > 1.02 && p.moved > 10){
+      Z.x += dx; Z.y += dy; clampZoom(); gesture.panned = true;
+      return;
+    }
+  }
+  if (e.pointerType !== 'touch'){
+    const pt = toV(e);
+    G.mouse = pt;
+    G.hover = hitBtn(pt);
+    const s = G.state === 'play' ? slotAt(pt) : null;
+    if (s !== G.tipSlot){ G.tipSlot = s; G.tipT = 0; G.tipForce = false; }
+  }
+});
+function endPointer(e){
+  const p = PTR.get(e.pointerId);
+  PTR.delete(e.pointerId);
+  if (PTR.size < 2) pinch = null;
+  if (!p) return;
+  if (gesture && gesture.id === e.pointerId){
+    const tap = p.type === 'touch' && !gesture.panned && p.moved < 16 &&
+                performance.now() - p.t < 900 && PTR.size === 0;
+    if (tap) onDown({clientX:p.sx, clientY:p.sy});
+    gesture = null;
+  }
+}
+CV.addEventListener('pointerup', endPointer);
+CV.addEventListener('pointercancel', e => { PTR.delete(e.pointerId); pinch = null; gesture = null; });
+CV.addEventListener('pointerleave', e => { if (e.pointerType !== 'touch'){ G.hover = null; hideTip(); } });
+/* molette + Ctrl sur ordinateur, comme partout ailleurs */
+CV.addEventListener('wheel', e => {
+  if (!e.ctrlKey) return;
+  e.preventDefault();
+  const nk = clamp(Z.k * (e.deltaY < 0 ? 1.12 : 1 / 1.12), 1, 3.6), r = nk / Z.k;
+  Z.x = e.clientX - OX - (e.clientX - OX - Z.x) * r;
+  Z.y = e.clientY - OY - (e.clientY - OY - Z.y) * r;
+  Z.k = nk; clampZoom();
+}, {passive:false});
 window.addEventListener('keydown', e => {
   if (e.key === 'h' || e.key === 'H') G.showHelp = !G.showHelp;
   if (e.key === 'm' || e.key === 'M') G.sound = !G.sound;
-  if (e.key === 'Escape') G.showHelp = false;
+  if (e.key === 'Escape'){ G.showHelp = false; resetZoom(); }
+  if (e.key === '0') resetZoom();
   if (e.key === ' '){
     e.preventDefault();
     if (G.state === 'menu'){ ac(); newGame(); return; }
@@ -2618,8 +2725,9 @@ function frame(t){
   CX.clearRect(0, 0, window.innerWidth, window.innerHeight);
   CX.fillStyle = '#0b1415';
   CX.fillRect(0, 0, window.innerWidth, window.innerHeight);
-  CX.translate(OX, OY); CX.scale(SC, SC);
+  CX.translate(OX + Z.x, OY + Z.y); CX.scale(SC * Z.k, SC * Z.k);
   try { draw(); } catch(err){ console.error(err); }
+  drawZoomBtn();
   requestAnimationFrame(frame);
 }
 
