@@ -34,7 +34,7 @@ const HINT = document.getElementById('hint');
 /* La hauteur virtuelle est fixe, la largeur suit le format de la fenêtre :
    plus de bandes noires, et tout le dessin occupe l'écran réel. */
 let VW = 1600, VH = 900;
-let SC = 1, OX = 0, OY = 0, DPR = 1;
+let SC = 1, OX = 0, OY = 0, DPR = 1, MOB = false;
 
 function resize(){
   const w = window.innerWidth, h = window.innerHeight;
@@ -43,9 +43,11 @@ function resize(){
   CV.width = Math.round(w * dpr); CV.height = Math.round(h * dpr);
   CV.style.width = w + 'px'; CV.style.height = h + 'px';
   VH = 900;
-  VW = clamp(Math.round(VH * w / Math.max(1, h)), 1360, 2200);
+  MOB = Math.min(w, h) <= 620;
+  VW = clamp(Math.round(VH * w / Math.max(1, h)), 1360, MOB ? 2400 : 2200);
   layout();
   SC = Math.min(w / VW, h / VH);
+  TS = MOB ? clamp(.95 / SC, 1, 2.6) : 1;
   OX = (w - VW * SC) / 2; OY = (h - VH * SC) / 2;
   CX.setTransform(dpr, 0, 0, dpr, 0, 0);
   if (G.state === 'play') repositionAll();
@@ -83,7 +85,13 @@ function rr(x, y, w, h, r){
 }
 function shadow(c, b, ox, oy){ CX.shadowColor=c; CX.shadowBlur=b; CX.shadowOffsetX=ox||0; CX.shadowOffsetY=oy||0; }
 function noShadow(){ CX.shadowColor='transparent'; CX.shadowBlur=0; CX.shadowOffsetX=0; CX.shadowOffsetY=0; }
+/* Sur mobile l'échelle d'affichage tombe à ~0,43 : tout le texte d'interface
+   est agrandi d'autant pour rester lisible. raw() sert aux rares textes déjà
+   calés sur la taille d'une carte ou d'un dé, qui ne doivent pas doubler. */
+let TS = 1;
+function raw(v){ return v / TS; }
 function txt(s, x, y, size, col, align, weight){
+  size *= TS;
   CX.font = (weight || '700') + ' ' + size + "px 'Trebuchet MS','Segoe UI',sans-serif";
   CX.fillStyle = col; CX.textAlign = align || 'left'; CX.textBaseline = 'middle';
   CX.fillText(s, x, y);
@@ -245,20 +253,33 @@ const LAY = {cw:176, ch:246, cells:[]};
    redimensionnement pour que le jeu remplisse toujours la fenêtre. */
 function layout(){
   const L = LAY;
-  L.panelW = Math.round(clamp(VW * .215, 320, 430));
-  L.panelX = VW - L.panelW - 12;
-  L.top    = 68;
-  L.strip  = 252;                              /* hauteur de la bande basse */
-  L.stripY = VH - L.strip;
-  L.boardW = L.panelX - 28;
-  L.boardH = L.stripY - L.top - 8;
+  L.mob = MOB;
+  if (MOB){
+    /* Paysage téléphone : pas de bande basse, tout le contrôle passe dans la
+       colonne de droite (scores, dés, boutons) et le tableau prend la hauteur. */
+    L.panelW = Math.round(clamp(VW * .215, 380, 560));
+    L.panelX = VW - L.panelW - 8;
+    L.top    = 58;
+    L.strip  = 0;
+    L.stripY = VH;
+    L.boardW = L.panelX - 18;
+    L.boardH = VH - L.top - 10;
+  } else {
+    L.panelW = Math.round(clamp(VW * .215, 320, 430));
+    L.panelX = VW - L.panelW - 12;
+    L.top    = 68;
+    L.strip  = 252;                            /* hauteur de la bande basse */
+    L.stripY = VH - L.strip;
+    L.boardW = L.panelX - 28;
+    L.boardH = L.stripY - L.top - 8;
+  }
 
   const n = G.cellCount || 11;
   const cols = Math.ceil(n / 2), botN = n - cols;
   const gap = Math.round(clamp(L.boardW * .030, 20, 44));
   let cw = Math.floor((L.boardW - (cols - 1) * gap) / cols);
   let ch = Math.round(cw / CARD_RATIO);
-  const badge = 26, rowGap = 34;
+  const badge = MOB ? 34 : 26, rowGap = MOB ? 26 : 34;
   const maxCh = Math.floor((L.boardH - rowGap - badge * 2) / 2);
   if (ch > maxCh){ ch = maxCh; cw = Math.round(ch * CARD_RATIO); }
   L.cw = cw; L.ch = ch; L.gap = gap; L.badge = badge;
@@ -282,25 +303,53 @@ function layout(){
   L.feltW = cols * cw + (cols - 1) * gap + 44;
   L.feltH = rowY[1] + ch / 2 + badge - L.feltY + 14;
 
-  /* bande basse */
-  L.collX = 26;
-  L.collW = Math.round(clamp(VW * .235, 340, 460));
-  L.collCard = Math.round(clamp(L.collW / 5.6, 58, 84));
-  L.collY = L.stripY + 62;
-  L.btnW = Math.round(clamp(VW * .155, 218, 268));
-  L.btnX = L.panelX - L.btnW - 18;
-  L.trayY = L.stripY + 132;
-  const availL = L.collX + L.collW + 24, availR = L.btnX - 18;
-  let d = DSZ_TRAY, sp = Math.round(d * 1.42);
-  const need = () => 4 * sp + 2.9 * d;
-  if (need() > availR - availL){
-    d = Math.floor(d * (availR - availL) / need());
-    sp = Math.round(d * 1.42);
+  if (MOB){
+    /* colonne de contrôle : joueurs en haut, dés au milieu, boutons en bas */
+    const pw = L.panelW - 24;
+    /* échelle d'affichage estimée : les zones tactiles sont dimensionnées en
+       pixels réels, pas en unités virtuelles. */
+    const sc = Math.min(window.innerWidth / VW, window.innerHeight / VH);
+    L.btnW = pw; L.btnX = L.panelX + 12;
+    L.btnH = Math.round(clamp(50 / sc, 76, 150));
+    L.btnY = VH - 12 - L.btnH * 2 - 10;
+    const nP = Math.max(2, (G.players && G.players.length) || 3);
+    L.rowH = clamp(Math.round((VH * .26) / nP), 52, 88);
+    const top = 72 + nP * L.rowH + 12;
+    const diceTop = top + 40, diceBot = L.btnY - 14;
+    const rowSp = (diceBot - diceTop) / 2;
+    DSZ_TRAY = Math.max(Math.round(clamp(46 / sc, 50, 160)),
+                        Math.min(Math.round(rowSp * .84), Math.round(pw / 3.3), 210));
+    L.diceZone = {x:L.panelX + 12, y:diceTop, w:pw, h:diceBot - diceTop};
+    L.diceCells = [];
+    const cx = L.panelX + L.panelW / 2, colSp = DSZ_TRAY * 1.08;
+    for (let i = 0; i < 6; i++){
+      const r = Math.floor(i / 3), c = i % 3;
+      L.diceCells.push({x:cx + (c - 1) * colSp, y:diceTop + rowSp * (r + .5)});
+    }
+    L.trayCx = cx; L.trayY = diceTop + rowSp;
+    L.trayX0 = L.diceZone.x; L.trayX1 = L.diceZone.x + pw;
+    L.collX = 0; L.collW = 0; L.collCard = 0; L.collY = VH;
+  } else {
+    L.collX = 26;
+    L.collW = Math.round(clamp(VW * .235, 340, 460));
+    L.collCard = Math.round(clamp(L.collW / 5.6, 58, 84));
+    L.collY = L.stripY + 62;
+    L.btnW = Math.round(clamp(VW * .155, 218, 268));
+    L.btnX = L.panelX - L.btnW - 18;
+    L.trayY = L.stripY + 132;
+    const availL = L.collX + L.collW + 24, availR = L.btnX - 18;
+    let d = DSZ_TRAY, sp = Math.round(d * 1.42);
+    const need = () => 4 * sp + 2.9 * d;
+    if (need() > availR - availL){
+      d = Math.floor(d * (availR - availL) / need());
+      sp = Math.round(d * 1.42);
+    }
+    DSZ_TRAY = d; L.traySp = sp;
+    L.trayCx = (availL + availR) / 2 - .95 * d;
+    L.trayX0 = L.trayCx - 2 * sp - d * .95;
+    L.trayX1 = L.trayCx + 2 * sp + d * 2.85;
+    L.diceCells = null;
   }
-  DSZ_TRAY = d; L.traySp = sp;
-  L.trayCx = (availL + availR) / 2 - .95 * d;
-  L.trayX0 = L.trayCx - 2 * sp - d * .95;
-  L.trayX1 = L.trayCx + 2 * sp + d * 2.85;
 }
 
 /* =======================================================================
@@ -843,17 +892,22 @@ function aiKeepMask(p, vals, isB){
    POSITIONS
    ======================================================================= */
 const PANEL_Y0 = 102;
-function panelRH(){ return Math.round(clamp((VH - PANEL_Y0 - 300) / Math.max(3, G.players.length || 3), 96, 132)); }
+function panelRH(){
+  if (MOB) return LAY.rowH || 70;
+  return Math.round(clamp((VH - PANEL_Y0 - 300) / Math.max(3, G.players.length || 3), 96, 132));
+}
 function panelRow(i){
-  const h = panelRH();
-  return {x:LAY.panelX + 14, y:PANEL_Y0 + i * h, w:LAY.panelW - 28, h:h - 12};
+  const h = panelRH(), y0 = MOB ? 72 : PANEL_Y0;
+  return {x:LAY.panelX + 12, y:y0 + i * h, w:LAY.panelW - 24, h:h - (MOB ? 8 : 12)};
 }
 function trayPositions(p){
+  if (LAY.diceCells) return LAY.diceCells.slice(0, 5);
   const n = Math.max(1, p.active), sp = LAY.traySp, x0 = LAY.trayCx - (n - 1) * sp / 2, out = [];
   for (let i = 0; i < 5; i++) out.push({x:x0 + i * sp, y:LAY.trayY});
   return out;
 }
 function bonusTrayPos(p){
+  if (LAY.diceCells) return LAY.diceCells[5];
   const n = Math.max(1, p.active);
   return {x:LAY.trayCx + (n - 1) * LAY.traySp / 2 + DSZ_TRAY * 1.9, y:LAY.trayY};
 }
@@ -877,13 +931,13 @@ function slotDicePos(slot, n){
   return out;
 }
 function homeOf(p){
-  if (!p.isAI) return {x:LAY.trayCx, y:LAY.trayY + 70};
+  if (!p.isAI) return {x:LAY.trayCx, y:LAY.trayY + (MOB ? 0 : 70)};
   const r = panelRow(p.id);
   return {x:r.x + 34, y:r.y + r.h / 2};
 }
 function collStackX(m){ return LAY.collX + LAY.collCard / 2 + m * (LAY.collW - LAY.collCard) / 4; }
 function collectPos(p, motif){
-  if (p.isAI){ const r = panelRow(p.id); return {x:r.x + r.w - 40, y:r.y + r.h / 2}; }
+  if (p.isAI || MOB){ const r = panelRow(p.id); return {x:r.x + r.w - 40, y:r.y + r.h / 2}; }
   return {x:collStackX(motif < 0 ? 4 : motif), y:LAY.collY + Math.round(LAY.collCard / CARD_RATIO) / 2};
 }
 
@@ -1317,7 +1371,7 @@ function drawDieObj(d){
     CX.globalAlpha = .95;
     CX.fillStyle = PAL.orange;
     rr(d.x - bw/2, d.y - z + s * .40, bw, bh, bh/2); CX.fill();
-    txt('GARDÉ', d.x, d.y - z + s * .40 + bh/2, s * .19, '#20140c', 'center');
+    txt('GARDÉ', d.x, d.y - z + s * .40 + bh/2, raw(s * .21), '#20140c', 'center');
     CX.restore();
   }
 }
@@ -1443,19 +1497,20 @@ function drawSlot(s){
     CX.restore();
   }
   if (s.pile.length && s.card){
-    const label = s.pile.length + 1, bw = Math.max(74, w * .58);
+    const label = s.pile.length + 1, bw = Math.max(74, w * .60), bh = Math.max(25, w * .15);
     CX.save();
     CX.fillStyle = 'rgba(8,16,17,.82)';
-    rr(s.x - bw/2, s.y + h/2 + 6, bw, 25, 12); CX.fill();
-    txt(label + ' carte' + (label > 1 ? 's' : ''), s.x, s.y + h/2 + 18, 14, PAL.ink2, 'center', '600');
+    rr(s.x - bw/2, s.y + h/2 + 6, bw, bh, bh/2); CX.fill();
+    txt(label + ' carte' + (label > 1 ? 's' : ''), s.x, s.y + h/2 + 6 + bh/2,
+        raw(Math.max(14, w * .105)), PAL.ink2, 'center', '600');
     CX.restore();
   }
   if (s.joker && s.card){
-    const bw = Math.max(90, w * .62);
+    const bw = Math.max(90, w * .66), bh = Math.max(25, w * .15);
     CX.save();
     CX.fillStyle = 'rgba(225,102,46,.85)';
-    rr(s.x - bw/2, s.y + h/2 + 6, bw, 25, 12); CX.fill();
-    txt('CARTE JOKER', s.x, s.y + h/2 + 18, 14, '#1b0f08', 'center', '800');
+    rr(s.x - bw/2, s.y + h/2 + 6, bw, bh, bh/2); CX.fill();
+    txt('CARTE JOKER', s.x, s.y + h/2 + 6 + bh/2, raw(Math.max(14, w * .095)), '#1b0f08', 'center', '800');
     CX.restore();
   }
   if (s.glow > 0){
@@ -1496,10 +1551,10 @@ function drawBonusZone(){
   CX.setLineDash([10, 8]);
   rr(b.x - w/2, b.y - h/2, w, h, 12); CX.fill(); CX.stroke();
   CX.restore();
-  txt('DÉ BONUS', b.x, b.y - h/2 + 26, Math.round(w * .105), PAL.ink2, 'center', '700');
+  txt('DÉ BONUS', b.x, b.y - h/2 + 28, raw(Math.round(w * .115)), PAL.ink2, 'center', '700');
   if (!b.claim)
-    txt('posez-y vos dés inutilisés', b.x, b.y + h * .04,
-        Math.round(w * .072), 'rgba(237,230,206,.38)', 'center', '600');
+    txt('posez-y vos dés inutilisés', b.x, b.y + h * .05,
+        raw(Math.round(w * .075)), 'rgba(237,230,206,.38)', 'center', '600');
   if (b.glow > 0){
     CX.save(); CX.globalAlpha = b.glow * .8; CX.strokeStyle = '#fff'; CX.lineWidth = 3;
     rr(b.x - w/2 - 4, b.y - h/2 - 4, w + 8, h + 8, 14); CX.stroke(); CX.restore();
@@ -1544,11 +1599,13 @@ function drawBg(){
 /* ---------- bandeau haut ---------- */
 function drawTopBar(){
   const p = G.players[G.current];
-  CX.save();
-  CX.font = "italic 800 32px 'Trebuchet MS',sans-serif";
-  CX.fillStyle = PAL.orange; CX.textAlign = 'left'; CX.textBaseline = 'middle';
-  CX.fillText("Roll'n Bump", 28, 34);
-  CX.restore();
+  if (!MOB){
+    CX.save();
+    CX.font = "italic 800 32px 'Trebuchet MS',sans-serif";
+    CX.fillStyle = PAL.orange; CX.textAlign = 'left'; CX.textBaseline = 'middle';
+    CX.fillText("Roll'n Bump", 28, 34);
+    CX.restore();
+  }
 
   let label = '', sub = '';
   if (G.state === 'play'){
@@ -1559,17 +1616,24 @@ function drawTopBar(){
     else if (G.phase === 'BONUS'){ label = 'Dé bonus'; sub = 'Alignez un dé sur le bonus, ou passez'; }
     else if (G.phase === 'RECLAIM'){ label = p.name + ' récupère ses dés'; sub = ''; }
     if (p.isAI) sub = 'Tour de ' + p.name;
+    if (MOB && G.log.length && performance.now() - G.log[0].t < 3500) sub = G.log[0].s;
   }
-  const cx = boardCx(), w = clamp(VW * .34, 460, 640), x = cx - w/2;
+  const cx = MOB ? (boardCx() - 60) : boardCx();
+  const bh = MOB ? 48 : 50, by = MOB ? 6 : 10;
+  const w = MOB ? clamp(VW * .52, 700, 1200) : clamp(VW * .34, 460, 640), x = cx - w/2;
   CX.save();
-  CX.fillStyle = 'rgba(8,16,17,.72)'; rr(x, 10, w, 50, 25); CX.fill();
+  CX.fillStyle = 'rgba(8,16,17,.72)'; rr(x, by, w, bh, bh/2); CX.fill();
   CX.strokeStyle = p ? (p.hex + '99') : PAL.line; CX.lineWidth = 2; CX.stroke();
   CX.restore();
-  txt(label, cx, 27, 20, p ? p.hex : PAL.ink, 'center', '700');
-  txt(sub, cx, 48, 14, PAL.ink2, 'center', '600');
-
-  uiBtn('help', LAY.panelX - 136, 12, 50, 46, '?', 'ghost');
-  uiBtn('sound', LAY.panelX - 78, 12, 74, 46, G.sound ? '♪ on' : '♪ off', 'ghost');
+  if (MOB){
+    txt(label + (sub ? '  ·  ' + sub : ''), cx, by + bh/2, 13, p ? p.hex : PAL.ink, 'center', '700');
+  } else {
+    txt(label, cx, 27, 20, p ? p.hex : PAL.ink, 'center', '700');
+    txt(sub, cx, 48, 14, PAL.ink2, 'center', '600');
+  }
+  const bw = MOB ? 62 : 50, bw2 = MOB ? 86 : 74;
+  uiBtn('help', LAY.panelX - bw - bw2 - 16, by, bw, bh, '?', 'ghost');
+  uiBtn('sound', LAY.panelX - bw2 - 6, by, bw2, bh, G.sound ? '♪' : '♪✕', 'ghost');
 }
 
 /* ---------- collection du joueur humain ---------- */
@@ -1605,6 +1669,26 @@ function drawCollection(){
 /* ---------- zone de dés ---------- */
 function drawTray(){
   const p = G.players[G.current], L = LAY;
+  if (MOB){
+    const z = L.diceZone;
+    CX.save();
+    CX.fillStyle = 'rgba(237,230,206,.05)';
+    rr(z.x, z.y - 34, z.w, z.h + 40, 18); CX.fill();
+    CX.strokeStyle = p.id === 0 ? 'rgba(225,102,46,.5)' : PAL.line;
+    CX.lineWidth = 1.5; CX.stroke();
+    CX.restore();
+    txt(p.isAI ? 'DÉS DE ' + p.name.toUpperCase() : 'VOS DÉS',
+        z.x + 14, z.y - 16, 11, PAL.ink2, 'left', '700');
+    if (G.phase === 'ROLL')
+      for (let i = 0; i < 3; i++){
+        const on = i < (3 - G.rollsLeft);
+        CX.save();
+        CX.fillStyle = on ? PAL.orange : 'rgba(237,230,206,.18)';
+        CX.beginPath(); CX.arc(z.x + z.w - 16 - i * 11 * TS, z.y - 16, 4 * TS, 0, 6.3); CX.fill();
+        CX.restore();
+      }
+    return;
+  }
   CX.save();
   CX.fillStyle = 'rgba(237,230,206,.05)';
   rr(L.trayX0, L.stripY + 30, L.trayX1 - L.trayX0, L.strip - 58, 22); CX.fill();
@@ -1632,9 +1716,47 @@ function drawPanel(){
   rr(L.panelX, 8, L.panelW, VH - 16, 16); CX.fill();
   CX.strokeStyle = PAL.line; CX.lineWidth = 1.5; CX.stroke();
   CX.restore();
+
+  if (MOB){
+    txt('JOUEURS', L.panelX + 14, 40, 11, PAL.ink2, 'left', '700');
+    txt('Tour ' + G.turnCount, L.panelX + L.panelW - 14, 40, 11, PAL.ink2, 'right', '600');
+    for (const p of G.players){
+      const r = panelRow(p.id), active = p.id === G.current && G.state === 'play';
+      const sc = scoreOf(p);
+      CX.save();
+      CX.fillStyle = active ? 'rgba(225,102,46,.15)' : 'rgba(237,230,206,.05)';
+      rr(r.x, r.y, r.w, r.h, 11); CX.fill();
+      CX.strokeStyle = active ? PAL.orange : PAL.line; CX.lineWidth = active ? 2 : 1; CX.stroke();
+      CX.fillStyle = p.hex;
+      CX.beginPath(); CX.arc(r.x + 20, r.y + r.h * .32, 10, 0, 6.3); CX.fill();
+      CX.restore();
+      txt(p.name, r.x + 38, r.y + r.h * .32, 13, active ? PAL.ink : '#cfc9b4', 'left', '700');
+      let ix = r.x + r.w - 12;
+      txt(sc.total, ix, r.y + r.h * .32, 17, PAL.orange, 'right', '800');
+      if (sc.hasJoker || G.bonus.holder === p.id || (G.bonus.claim && G.bonus.claim.pid === p.id)){
+        const tag = sc.hasJoker ? 'J' : 'B';
+        ix -= 34 * TS;
+        CX.save(); CX.fillStyle = sc.hasJoker ? PAL.cream : '#fff';
+        CX.beginPath(); CX.arc(ix, r.y + r.h * .32, 9, 0, 6.3); CX.fill(); CX.restore();
+        txt(tag, ix, r.y + r.h * .32, 11, '#101b1c', 'center', '800');
+      }
+      const cw2 = (r.w - 24) / 4, cy = r.y + r.h * .72;
+      for (let m = 0; m < 4; m++){
+        const x = r.x + 12 + m * cw2;
+        CX.save();
+        CX.globalAlpha = sc.counts[m] ? 1 : .26;
+        CX.fillStyle = MOTIF_COL[m];
+        rr(x, cy - 10, cw2 - 6, 21, 6); CX.fill();
+        CX.restore();
+        txt(sc.counts[m] + (sc.counts[m] >= 2 ? '·' + serieBonus(sc.counts[m]) : ''),
+            x + (cw2 - 6) / 2, cy, 10, '#121c1d', 'center', '800');
+      }
+    }
+    return;
+  }
+
   txt('JOUEURS', L.panelX + 22, 36, 15, PAL.ink2, 'left', '700');
   txt('Tour ' + G.turnCount, L.panelX + L.panelW - 22, 36, 15, PAL.ink2, 'right', '600');
-
   for (const p of G.players){
     const r = panelRow(p.id), active = p.id === G.current && G.state === 'play';
     CX.save();
@@ -1730,7 +1852,21 @@ function drawButtons(){
   if (G.state !== 'play') return;
   const p = G.players[G.current];
   if (p.isAI) return;
-  const L = LAY, X = L.btnX, W = L.btnW, y = L.stripY + 44;
+  const L = LAY;
+  if (MOB){
+    const X = L.btnX, W = L.btnW, H = L.btnH, y = L.btnY;
+    if (G.phase === 'ROLL'){
+      uiBtn('reroll', X, y, W, H, 'Relancer (' + G.rollsLeft + ')', 'primary', G.rollsLeft > 0);
+      uiBtn('stoproll', X, y + H + 10, W, H, 'Revendiquer', 'ghost');
+    } else if (G.phase === 'CLAIM'){
+      uiBtn('auto', X, y, W, H, 'Coup auto', 'ghost');
+      uiBtn('endturn', X, y + H + 10, W, H, 'Terminer', 'primary');
+    } else if (G.phase === 'BONUS'){
+      uiBtn('skipbonus', X, y + H + 10, W, H, 'Passer', 'ghost');
+    }
+    return;
+  }
+  const X = L.btnX, W = L.btnW, y = L.stripY + 44;
   if (G.phase === 'ROLL'){
     uiBtn('reroll', X, y, W, 62, 'Relancer (' + G.rollsLeft + ')', 'primary', G.rollsLeft > 0);
     uiBtn('stoproll', X, y + 74, W, 54, 'Passer à la revendication', 'ghost');
@@ -1864,7 +2000,7 @@ function slotAt(pt){
   return null;
 }
 function wrapText(str, maxW, size, weight){
-  CX.font = (weight || '600') + ' ' + size + "px 'Trebuchet MS','Segoe UI',sans-serif";
+  CX.font = (weight || '600') + ' ' + (size * TS) + "px 'Trebuchet MS','Segoe UI',sans-serif";
   const words = str.split(' '), out = [];
   let cur = '';
   for (const w of words){
@@ -1961,7 +2097,8 @@ function tipContent(slot){
 }
 function drawTip(slot, alpha){
   const K = 1.14;                                   /* texte de l'infobulle */
-  const W = 400, pad = 17, maxW = W - pad * 2;
+  const W = MOB ? Math.min(880, LAY.panelX - 40) : 400;
+  const pad = 17, maxW = W - pad * 2;
   const items = [];
   let h = pad * 2;
   for (const b of tipContent(slot)){
@@ -2007,7 +2144,7 @@ function draw(){
     for (const s of G.hl.any) if (!G.hl.ok.has(s)) drawHighlight(s, '#f2a65a', false);
     for (const s of G.hl.ok) drawHighlight(s, '#7ce38e', true);
   }
-  drawCollection();
+  if (!MOB) drawCollection();
   drawTray();
   drawPanel();
   drawTopBar();
