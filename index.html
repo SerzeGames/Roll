@@ -27,7 +27,7 @@
    ======================================================================= */
 
 const CV = document.getElementById('cv');
-const CX = CV.getContext('2d');
+const CX = CV.getContext('2d', {alpha:false, desynchronized:true}) || CV.getContext('2d');
 const HINT = document.getElementById('hint');
 
 /* ---------- resolution virtuelle ---------- */
@@ -38,12 +38,15 @@ let SC = 1, OX = 0, OY = 0, DPR = 1, MOB = false;
 
 function resize(){
   const w = window.innerWidth, h = window.innerHeight;
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  MOB = Math.min(w, h) <= 620;
+  /* sur téléphone on plafonne la densité : le remplissage de 1,4 million de
+     pixels par image coûte plus qu'il ne rapporte à cette taille de texte. */
+  const dpr = Math.min(window.devicePixelRatio || 1, MOB ? 1.6 : 2);
   DPR = dpr;
   CV.width = Math.round(w * dpr); CV.height = Math.round(h * dpr);
   CV.style.width = w + 'px'; CV.style.height = h + 'px';
   VH = 900;
-  MOB = Math.min(w, h) <= 620;
+  BGGRAD = null; BACKIMG = null;               /* caches dépendants de la taille */
   VW = clamp(Math.round(VH * w / Math.max(1, h)), 1360, MOB ? 2400 : 2200);
   layout();
   SC = Math.min(w / VW, h / VH);
@@ -364,7 +367,7 @@ const G = {
   nbPlayers:3, level:1,    /* 0 facile 1 normal 2 difficile */
   log:[], hitBtns:[], flying:[], msg:'', cellCount:11, jokerCell:8, bonusCell:5,
   uiResolve:null, endReason:'',
-  busy:false, hover:null, showHelp:false, hl:null,
+  busy:false, hover:null, showHelp:false, hl:null, hlSig:null,
   tipSlot:null, tipT:0, tipForce:false, mouse:{x:0,y:0}, undoStack:[]
 };
 /* Réglages calibrés par duels IA contre IA (voir commentaires ci-dessous) :
@@ -1439,9 +1442,11 @@ function drawCardAt(card, x, y, w, h, o){
   if (o.rot) CX.rotate(o.rot);
   if (o.sc) CX.scale(o.sc, o.sc);
   if (o.sx !== undefined) CX.scale(o.sx, 1);
-  if (o.shadow !== false) shadow('rgba(0,0,0,.55)', 16, 0, 7);
+  if (o.shadow !== false){                     /* ombre nette : le flou coûte très cher */
+    CX.fillStyle = 'rgba(0,0,0,.45)';
+    rr(-w/2 + 3, -h/2 + 6, w, h, 9); CX.fill();
+  }
   CX.fillStyle = '#0e1a1b'; rr(-w/2, -h/2, w, h, 9); CX.fill();
-  noShadow();
   CX.save(); rr(-w/2, -h/2, w, h, 9); CX.clip();
   if (IMG.cards){
     const cw = IMG.cards.width / 10, ch = IMG.cards.height / 5;
@@ -1453,35 +1458,66 @@ function drawCardAt(card, x, y, w, h, o){
   rr(-w/2, -h/2, w, h, 9); CX.stroke();
   CX.restore();
 }
+/* Le dos de carte est redessiné jusqu'à trente fois par image : on le rend
+   une seule fois hors écran, puis on se contente de le recopier. */
+let BACKIMG = null, BACKKEY = '';
+function backImage(w, h){
+  const key = Math.round(w) + 'x' + Math.round(h) + '@' + DPR.toFixed(2);
+  if (BACKIMG && BACKKEY === key) return BACKIMG;
+  let c;
+  try { c = document.createElement('canvas'); } catch(e){ return null; }
+  if (!c || !c.getContext) return null;
+  const k = Math.max(1, DPR);
+  c.width = Math.max(2, Math.round(w * k)); c.height = Math.max(2, Math.round(h * k));
+  const g = c.getContext('2d');
+  if (!g) return null;
+  g.setTransform(k, 0, 0, k, 0, 0);
+  const path = () => {
+    const r = 9;
+    g.beginPath();
+    g.moveTo(r, 0); g.lineTo(w - r, 0); g.quadraticCurveTo(w, 0, w, r);
+    g.lineTo(w, h - r); g.quadraticCurveTo(w, h, w - r, h);
+    g.lineTo(r, h); g.quadraticCurveTo(0, h, 0, h - r);
+    g.lineTo(0, r); g.quadraticCurveTo(0, 0, r, 0);
+    g.closePath();
+  };
+  g.fillStyle = '#20393b'; path(); g.fill();
+  g.save(); path(); g.clip();
+  g.strokeStyle = 'rgba(225,102,46,.5)'; g.lineWidth = w * .018;
+  const st = w * .17;
+  for (let i = -3; i < 8; i++){
+    g.beginPath(); g.arc(i * st, h - i * st * .32, w * .15, 0, 6.3); g.stroke();
+  }
+  g.fillStyle = 'rgba(237,230,206,.85)';
+  g.font = "italic 800 " + (w * .15) + "px 'Trebuchet MS',sans-serif";
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText("Roll'n", w/2, h/2 - w * .09); g.fillText('Bump', w/2, h/2 + w * .09);
+  g.restore();
+  g.strokeStyle = 'rgba(237,230,206,.28)'; g.lineWidth = 2;
+  path(); g.stroke();
+  BACKIMG = c; BACKKEY = key;
+  return c;
+}
 function drawCardBack(x, y, w, h, o){
   o = o || {};
+  const img = backImage(w, h);
   CX.save();
   CX.globalAlpha = o.a === undefined ? 1 : o.a;
   CX.translate(x, y);
   if (o.sx !== undefined) CX.scale(o.sx, 1);
-  if (o.shadow !== false) shadow('rgba(0,0,0,.5)', 12, 0, 5);
-  CX.fillStyle = '#20393b'; rr(-w/2, -h/2, w, h, 9); CX.fill();
-  noShadow();
-  CX.save(); rr(-w/2, -h/2, w, h, 9); CX.clip();
-  CX.strokeStyle = 'rgba(225,102,46,.5)'; CX.lineWidth = w * .018;
-  const st = w * .17;
-  for (let i = -3; i < 8; i++){
-    CX.beginPath(); CX.arc(-w/2 + i * st, h/2 - i * st * .32, w * .15, 0, 6.3); CX.stroke();
+  if (o.shadow !== false){
+    CX.fillStyle = 'rgba(0,0,0,.42)';
+    rr(-w/2 + 3, -h/2 + 6, w, h, 9); CX.fill();
   }
-  CX.fillStyle = 'rgba(237,230,206,.85)';
-  CX.font = "italic 800 " + (w * .15) + "px 'Trebuchet MS',sans-serif";
-  CX.textAlign = 'center'; CX.textBaseline = 'middle';
-  CX.fillText("Roll'n", 0, -w * .09); CX.fillText('Bump', 0, w * .09);
-  CX.restore();
-  CX.strokeStyle = 'rgba(237,230,206,.28)'; CX.lineWidth = 2;
-  rr(-w/2, -h/2, w, h, 9); CX.stroke();
+  if (img) CX.drawImage(img, -w/2, -h/2, w, h);
+  else { CX.fillStyle = '#20393b'; rr(-w/2, -h/2, w, h, 9); CX.fill(); }
   CX.restore();
 }
 
 /* ---------- plateau ---------- */
 function drawSlot(s){
   const w = LAY.cw, h = LAY.ch;
-  const back = Math.min(s.pile.length, 4);
+  const back = Math.min(s.pile.length, 3);
   for (let i = back; i >= 1; i--) drawCardBack(s.x + i * 4, s.y + i * 5, w, h, {shadow:i === back});
   if (s.card){
     if (s.flip !== undefined && s.flip < 1){
@@ -1525,16 +1561,17 @@ function drawHighlight(s, col, strong){
   const bw = LAY.cw + 14, bh = LAY.ch + 14, y = s.y;
   const pulse = .5 + Math.sin(performance.now() / (strong ? 230 : 520)) * .5;
   CX.save();
-  CX.globalAlpha = strong ? (.72 + pulse * .28) : (.5 + pulse * .22);
-  CX.strokeStyle = col; CX.lineWidth = strong ? 5 : 3.5;
-  shadow(col, strong ? 26 : 15, 0, 0);
+  const a = strong ? (.72 + pulse * .28) : (.5 + pulse * .22);
+  CX.strokeStyle = col;
+  CX.globalAlpha = a * .30; CX.lineWidth = strong ? 14 : 9;
+  rr(s.x - bw/2, y - bh/2, bw, bh, 14); CX.stroke();
+  CX.globalAlpha = a; CX.lineWidth = strong ? 5 : 3.5;
   rr(s.x - bw/2, y - bh/2, bw, bh, 14); CX.stroke();
   if (strong){
     CX.globalAlpha = .16;
     CX.fillStyle = col; rr(s.x - bw/2, y - bh/2, bw, bh, 14); CX.fill();
   }
   CX.restore();
-  noShadow();
 }
 /* assombrit les cartes qu'aucune combinaison ne peut prendre ce tour-ci */
 function drawVeil(s){
@@ -1568,7 +1605,7 @@ function uiBtn(id, x, y, w, h, label, style, enabled){
   CX.save();
   CX.globalAlpha = on ? 1 : .35;
   if (style === 'primary'){
-    if (hot) shadow('rgba(225,102,46,.6)', 20, 0, 0);
+    if (hot && !MOB) shadow('rgba(225,102,46,.6)', 20, 0, 0);
     const g = CX.createLinearGradient(0, y, 0, y + h);
     g.addColorStop(0, hot ? '#f4813f' : '#e1662e'); g.addColorStop(1, hot ? '#d55a24' : '#b94b1d');
     CX.fillStyle = g; rr(x, y, w, h, 11); CX.fill(); noShadow();
@@ -1584,11 +1621,14 @@ function uiBtn(id, x, y, w, h, label, style, enabled){
 }
 
 /* ---------- fond ---------- */
+let BGGRAD = null;
 function drawBg(){
-  const g = CX.createRadialGradient(boardCx(), LAY.top + LAY.boardH / 2, 60,
-                                   boardCx(), LAY.top + LAY.boardH / 2, VW * .62);
-  g.addColorStop(0, '#1b3133'); g.addColorStop(.55, '#132325'); g.addColorStop(1, '#0b1415');
-  CX.fillStyle = g; CX.fillRect(0, 0, VW, VH);
+  if (!BGGRAD){
+    BGGRAD = CX.createRadialGradient(boardCx(), LAY.top + LAY.boardH / 2, 60,
+                                     boardCx(), LAY.top + LAY.boardH / 2, VW * .62);
+    BGGRAD.addColorStop(0, '#1b3133'); BGGRAD.addColorStop(.55, '#132325'); BGGRAD.addColorStop(1, '#0b1415');
+  }
+  CX.fillStyle = BGGRAD; CX.fillRect(0, 0, VW, VH);
   CX.save();
   CX.fillStyle = 'rgba(237,230,206,.035)';
   rr(LAY.feltX, LAY.feltY, LAY.feltW, LAY.feltH, 30); CX.fill();
@@ -1831,7 +1871,26 @@ function drawParts(){
 }
 
 /* ---------- surbrillances ---------- */
+/* Empreinte numérique de tout ce dont dépendent les surbrillances. Sans elle,
+   on recalculait toutes les combinaisons possibles à chaque image, soit
+   quelques centaines d'objets par seconde jetés au ramasse-miettes. */
+function hlSig(){
+  const p = G.players[G.current];
+  if (!p) return 0;
+  let n = (G.state === 'play' ? 1 : 2) * 31 + G.phase.length * 7 + G.current * 13;
+  for (let i = 0; i < p.active; i++){
+    const d = p.dice[i];
+    n = (n * 31 + d.value + (d.at ? 97 : 0) + (d.sel ? 11 : 0)) | 0;
+  }
+  for (const s of G.slots)
+    n = (n * 17 + (s.claim ? s.claim.pid * 41 + s.claim.sum : 0) + (s.card ? s.card.id : 3)) | 0;
+  n = (n * 17 + (G.bonus.claim ? G.bonus.claim.pid * 41 + G.bonus.claim.sum : 0)) | 0;
+  return n;
+}
 function refreshHL(){
+  const sig = hlSig();
+  if (G.hl && sig === G.hlSig) return;
+  G.hlSig = sig;
   G.hl = {ok:new Set(), any:new Set(), active:false};
   if (G.state !== 'play' || G.phase !== 'CLAIM') return;
   const p = G.players[G.current];
@@ -1949,6 +2008,9 @@ function drawHelp(){
     'Bonus de série : 2→3, 3→6, 4→10, 5→15, 6→21, 7→28, 8→36, 9→45, 10→55, 11→66, 12→78.'
   ];
   notes.forEach((n, i) => txt(n, x + 42, y + 470 + i * 34, 16, PAL.ink2, 'left', '600'));
+  txt(FPS + ' images/s' + (MOB ? '  ·  mobile' : '') + '  ·  ' + Math.round(VW) + '×' + VH +
+      '  ·  densité ' + DPR.toFixed(1),
+      x + w - 36, y + h - 54, 13, 'rgba(237,230,206,.4)', 'right', '600');
   uiBtn('closehelp', x + w/2 - 100, y + h - 82, 200, 56, 'Fermer', 'primary');
 }
 
@@ -2303,9 +2365,12 @@ window.addEventListener('keydown', e => {
    BOUCLE
    ======================================================================= */
 let lastT = performance.now();
+let fpsAcc = 0, fpsCount = 0, FPS = 0;
 function frame(t){
   const dt = Math.min(.05, (t - lastT) / 1000);
   lastT = t;
+  fpsAcc += dt; fpsCount++;
+  if (fpsAcc >= .5){ FPS = Math.round(fpsCount / fpsAcc); fpsAcc = 0; fpsCount = 0; }
   stepAnims(dt); stepParts(dt);
   if (G.tipSlot && !G.tipForce) G.tipT += dt;
   for (const s of G.slots) if (s.glow > 0) s.glow = Math.max(0, s.glow - dt * 1.6);
