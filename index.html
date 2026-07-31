@@ -1,0 +1,2198 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Roll'n Bump</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:100%;height:100%;overflow:hidden;background:#101b1c;
+    font-family:'Trebuchet MS','Segoe UI',system-ui,sans-serif;
+    -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+  #cv{display:block;position:absolute;left:0;top:0;touch-action:none}
+  #hint{position:absolute;left:50%;top:10px;transform:translateX(-50%);z-index:9;
+    color:#EDE6CE;background:rgba(10,20,20,.82);border:1px solid rgba(237,230,206,.25);
+    padding:7px 16px;border-radius:20px;font-size:13px;display:none;pointer-events:none}
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<div id="hint">Glissez-déposez spritesheet.png et dés.png pour utiliser les vrais visuels</div>
+<script>
+'use strict';
+
+/* =======================================================================
+   ROLL'N BUMP  --  adaptation HTML5 Canvas (jeu original : BOOM Editions)
+   Un seul fichier. Place spritesheet.png et dés.png a cote de ce .html
+   ======================================================================= */
+
+const CV = document.getElementById('cv');
+const CX = CV.getContext('2d');
+const HINT = document.getElementById('hint');
+
+/* ---------- resolution virtuelle ---------- */
+/* La hauteur virtuelle est fixe, la largeur suit le format de la fenêtre :
+   plus de bandes noires, et tout le dessin occupe l'écran réel. */
+let VW = 1600, VH = 900;
+let SC = 1, OX = 0, OY = 0, DPR = 1;
+
+function resize(){
+  const w = window.innerWidth, h = window.innerHeight;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  DPR = dpr;
+  CV.width = Math.round(w * dpr); CV.height = Math.round(h * dpr);
+  CV.style.width = w + 'px'; CV.style.height = h + 'px';
+  VH = 900;
+  VW = clamp(Math.round(VH * w / Math.max(1, h)), 1360, 2200);
+  layout();
+  SC = Math.min(w / VW, h / VH);
+  OX = (w - VW * SC) / 2; OY = (h - VH * SC) / 2;
+  CX.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (G.state === 'play') repositionAll();
+}
+window.addEventListener('resize', resize);
+
+/* ---------- utils ---------- */
+const rnd  = n => Math.floor(Math.random() * n);
+const d6   = () => 1 + rnd(6);
+const lerp = (a, b, t) => a + (b - a) * t;
+const clamp= (v, a, b) => v < a ? a : (v > b ? b : v);
+const sum  = a => a.reduce((x, y) => x + y, 0);
+const easeOut   = t => 1 - Math.pow(1 - t, 3);
+const easeIn    = t => t * t * t;
+const easeInOut = t => t < .5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3) / 2;
+const easeBack  = t => { const c1=1.70158, c3=c1+1; return 1 + c3*Math.pow(t-1,3) + c1*Math.pow(t-1,2); };
+const wait = ms => new Promise(r => setTimeout(r, ms));
+
+/* rebond a trois impacts : cœur du ressenti "des qui roulent" */
+function hop(t){
+  if (t < .60) return Math.sin(Math.PI * (t / .60));
+  if (t < .85) return Math.sin(Math.PI * ((t - .60) / .25)) * .26;
+  return Math.sin(Math.PI * ((t - .85) / .15)) * .07;
+}
+
+function rr(x, y, w, h, r){
+  r = Math.min(r, w/2, h/2);
+  CX.beginPath();
+  CX.moveTo(x+r, y);
+  CX.lineTo(x+w-r, y);   CX.quadraticCurveTo(x+w, y, x+w, y+r);
+  CX.lineTo(x+w, y+h-r); CX.quadraticCurveTo(x+w, y+h, x+w-r, y+h);
+  CX.lineTo(x+r, y+h);   CX.quadraticCurveTo(x, y+h, x, y+h-r);
+  CX.lineTo(x, y+r);     CX.quadraticCurveTo(x, y, x+r, y);
+  CX.closePath();
+}
+function shadow(c, b, ox, oy){ CX.shadowColor=c; CX.shadowBlur=b; CX.shadowOffsetX=ox||0; CX.shadowOffsetY=oy||0; }
+function noShadow(){ CX.shadowColor='transparent'; CX.shadowBlur=0; CX.shadowOffsetX=0; CX.shadowOffsetY=0; }
+function txt(s, x, y, size, col, align, weight){
+  CX.font = (weight || '700') + ' ' + size + "px 'Trebuchet MS','Segoe UI',sans-serif";
+  CX.fillStyle = col; CX.textAlign = align || 'left'; CX.textBaseline = 'middle';
+  CX.fillText(s, x, y);
+}
+
+/* ---------- palette (tiree des motifs des cartes) ---------- */
+const PAL = {
+  bg0:'#0d1719', bg1:'#16282a', ink:'#EDE6CE', ink2:'#a8a48f',
+  orange:'#E1662E', cream:'#EDE6CE', deep:'#0a1214',
+  panel:'rgba(20,36,38,.86)', line:'rgba(237,230,206,.16)'
+};
+
+/* ---------- moteur d'animation ---------- */
+const anims = [];
+function anim(dur, update, ease){
+  return new Promise(res => anims.push({t:0, dur, update, ease: ease || (t=>t), res}));
+}
+function stepAnims(dt){
+  for (let i = anims.length - 1; i >= 0; i--){
+    const a = anims[i];
+    a.t += dt;
+    const p = Math.min(1, a.t / a.dur);
+    a.update(a.ease(p), p);
+    if (p >= 1){ anims.splice(i, 1); a.res(); }
+  }
+}
+const parts = [];
+function burst(x, y, col, n){
+  for (let i = 0; i < (n || 14); i++){
+    const a = Math.random() * Math.PI * 2, s = 60 + Math.random() * 190;
+    parts.push({x, y, vx:Math.cos(a)*s, vy:Math.sin(a)*s - 60, life:.55 + Math.random()*.45,
+                t:0, col, sz:4 + Math.random()*5, rot:Math.random()*6});
+  }
+}
+function stepParts(dt){
+  for (let i = parts.length - 1; i >= 0; i--){
+    const p = parts[i];
+    p.t += dt; p.vy += 900 * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.rot += dt * 6;
+    if (p.t >= p.life) parts.splice(i, 1);
+  }
+}
+
+/* ---------- sons (WebAudio, sans fichier) ---------- */
+let AC = null;
+function ac(){ if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch(e){} } return AC; }
+function blip(f, dur, type, vol, slide){
+  const a = ac(); if (!a || !G.sound) return;
+  const o = a.createOscillator(), g = a.createGain();
+  o.type = type || 'triangle'; o.frequency.setValueAtTime(f, a.currentTime);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(40, slide), a.currentTime + dur);
+  g.gain.setValueAtTime(0.0001, a.currentTime);
+  g.gain.exponentialRampToValueAtTime(vol || .12, a.currentTime + .012);
+  g.gain.exponentialRampToValueAtTime(0.0001, a.currentTime + dur);
+  o.connect(g); g.connect(a.destination); o.start(); o.stop(a.currentTime + dur + .02);
+}
+function clack(vol){
+  const a = ac(); if (!a || !G.sound) return;
+  const n = a.sampleRate * .06, buf = a.createBuffer(1, n, a.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = (Math.random()*2-1) * Math.pow(1 - i/n, 3);
+  const s = a.createBufferSource(); s.buffer = buf;
+  const f = a.createBiquadFilter(); f.type='bandpass'; f.frequency.value = 900 + Math.random()*900; f.Q.value = 1.2;
+  const g = a.createGain(); g.gain.value = vol || .22;
+  s.connect(f); f.connect(g); g.connect(a.destination); s.start();
+}
+const SFX = {
+  roll(){ for (let i=0;i<5;i++) setTimeout(()=>clack(.16+Math.random()*.12), i*70+rnd(40)); },
+  land(){ clack(.28); },
+  place(){ blip(520,.12,'triangle',.10,760); },
+  claim(){ blip(440,.1,'triangle',.11); setTimeout(()=>blip(660,.14,'triangle',.11),90); },
+  bump(){ blip(160,.22,'sawtooth',.14,60); clack(.3); },
+  card(){ blip(300,.16,'sine',.09,520); },
+  win(){ [523,659,784,1046].forEach((f,i)=>setTimeout(()=>blip(f,.24,'triangle',.12), i*110)); },
+  bad(){ blip(200,.3,'sawtooth',.10,90); }
+};
+
+/* ---------- assets ---------- */
+const IMG = { cards:null, dice:null };
+function tryLoad(list, done){
+  let i = 0;
+  const next = () => {
+    if (i >= list.length){ done(null); return; }
+    const im = new Image();
+    im.onload = () => done(im);
+    im.onerror = () => { i++; next(); };
+    im.src = list[i];
+  };
+  next();
+}
+function loadAssets(){
+  tryLoad(['spritesheet.png','images/spritesheet.png','cartes.png','cards.png'], im => { IMG.cards = im; checkAssets(); });
+  tryLoad(['des.png','dés.png','images/des.png','images/dés.png','dice.png','des.PNG'], im => { IMG.dice = im; checkAssets(); });
+}
+let assetMsgDone = false;
+function checkAssets(){
+  if (assetMsgDone) return;
+  setTimeout(() => {
+    if (assetMsgDone) return;
+    assetMsgDone = true;
+    if (!IMG.cards || !IMG.dice){
+      HINT.style.display = 'block';
+      setTimeout(()=>{ HINT.style.display='none'; }, 9000);
+    }
+  }, 400);
+}
+/* glisser-deposer des sprites (pratique si le html est ouvert seul) */
+window.addEventListener('dragover', e => { e.preventDefault(); HINT.style.display='block'; });
+window.addEventListener('dragleave', () => { HINT.style.display='none'; });
+window.addEventListener('drop', e => {
+  e.preventDefault(); HINT.style.display='none';
+  for (const f of e.dataTransfer.files){
+    const url = URL.createObjectURL(f), im = new Image();
+    const isDice = /d[eé]s?|dice/i.test(f.name);
+    im.onload = () => { if (isDice) IMG.dice = im; else IMG.cards = im; };
+    im.src = url;
+  }
+});
+
+/* =======================================================================
+   DONNEES DE JEU
+   ======================================================================= */
+
+/* Les 12 combinaisons, dans l'ordre exact du spritesheet (4 motifs chacune) */
+const COMBOS = [
+  {k:'simple', face:1, n:1, pts:1,  lbl:'Simple 1'},
+  {k:'simple', face:2, n:1, pts:1,  lbl:'Simple 2'},
+  {k:'simple', face:3, n:1, pts:1,  lbl:'Simple 3'},
+  {k:'simple', face:4, n:1, pts:1,  lbl:'Simple 4'},
+  {k:'simple', face:5, n:1, pts:1,  lbl:'Simple 5'},
+  {k:'simple', face:6, n:1, pts:1,  lbl:'Simple 6'},
+  {k:'same',   n:2, pts:2,  lbl:'2 identiques'},
+  {k:'run',    n:3, pts:3,  lbl:'Suite de 3'},
+  {k:'same',   n:3, pts:5,  lbl:'3 identiques'},
+  {k:'run',    n:4, pts:7,  lbl:'Suite de 4'},
+  {k:'run',    n:5, pts:10, lbl:'Suite de 5'},
+  {k:'same',   n:4, pts:12, lbl:'4 identiques'}
+];
+const JOKER_COMBO = {k:'same', n:5, pts:15, lbl:'5 identiques'};
+
+const MOTIF_NAME = ['Graphite','Azur','Brique','Safran'];
+const MOTIF_COL  = ['#9aa09a','#3fa9d4','#c94430','#e0952f'];
+const MOTIF_BG   = ['#c9c6b6','#15486b','#6d1a17','#e8dfb2'];
+const MOTIF_FG   = ['#333d41','#4fc0ee','#d4551f','#e2922e'];
+
+/* couleurs de joueurs = lignes du spritesheet de des */
+const DIE_ROW  = [0, 1, 2, 3];                                  /* aqua, rouge, mauve, vert */
+const DIE_HEX  = ['#1e8ba6','#cf2b3c','#7d3b8f','#6f9c3a'];
+const DIE_BONUS_ROW = 6;                                        /* blanc */
+
+/* bonus de serie : 0,0,3,6,10,15,21,28,36,45,55,66,78 */
+function serieBonus(n){ return n >= 2 ? n * (n + 1) / 2 : 0; }
+
+/* ---------- geometrie ---------- */
+let DSZ_TRAY = 64, DSZ_BOARD = 52, DSZ_BONUS = 60;
+const CARD_RATIO = 0.716;                     /* largeur / hauteur d'une carte */
+const LAY = {cw:176, ch:246, cells:[]};
+
+/* Tout le placement découle d'ici : grille de cases sur deux rangées, bande
+   basse (collection, dés, boutons) et panneau latéral. Recalculé à chaque
+   redimensionnement pour que le jeu remplisse toujours la fenêtre. */
+function layout(){
+  const L = LAY;
+  L.panelW = Math.round(clamp(VW * .215, 320, 430));
+  L.panelX = VW - L.panelW - 12;
+  L.top    = 68;
+  L.strip  = 252;                              /* hauteur de la bande basse */
+  L.stripY = VH - L.strip;
+  L.boardW = L.panelX - 28;
+  L.boardH = L.stripY - L.top - 8;
+
+  const n = G.cellCount || 11;
+  const cols = Math.ceil(n / 2), botN = n - cols;
+  const gap = Math.round(clamp(L.boardW * .030, 20, 44));
+  let cw = Math.floor((L.boardW - (cols - 1) * gap) / cols);
+  let ch = Math.round(cw / CARD_RATIO);
+  const badge = 26, rowGap = 34;
+  const maxCh = Math.floor((L.boardH - rowGap - badge * 2) / 2);
+  if (ch > maxCh){ ch = maxCh; cw = Math.round(ch * CARD_RATIO); }
+  L.cw = cw; L.ch = ch; L.gap = gap; L.badge = badge;
+
+  DSZ_BOARD = Math.round(cw * .30);
+  DSZ_BONUS = Math.round(cw * .34);
+  DSZ_TRAY  = Math.round(clamp(L.strip * .26, 52, 74));
+
+  const totalH = 2 * ch + rowGap + badge * 2;
+  const y0 = L.top + Math.max(0, (L.boardH - totalH) / 2) + ch / 2;
+  const rowY = [y0, y0 + ch + rowGap + badge];
+  L.cells = [];
+  for (let r = 0; r < 2; r++){
+    const k = r ? botN : cols;
+    const wRow = k * cw + (k - 1) * gap;
+    const x0 = (L.panelX - wRow) / 2 + cw / 2;
+    for (let i = 0; i < k; i++) L.cells.push({x:x0 + i * (cw + gap), y:rowY[r]});
+  }
+  L.feltX = (L.panelX - (cols * cw + (cols - 1) * gap)) / 2 - 22;
+  L.feltY = rowY[0] - ch / 2 - 20;
+  L.feltW = cols * cw + (cols - 1) * gap + 44;
+  L.feltH = rowY[1] + ch / 2 + badge - L.feltY + 14;
+
+  /* bande basse */
+  L.collX = 26;
+  L.collW = Math.round(clamp(VW * .235, 340, 460));
+  L.collCard = Math.round(clamp(L.collW / 5.6, 58, 84));
+  L.collY = L.stripY + 62;
+  L.btnW = Math.round(clamp(VW * .155, 218, 268));
+  L.btnX = L.panelX - L.btnW - 18;
+  L.trayY = L.stripY + 132;
+  const availL = L.collX + L.collW + 24, availR = L.btnX - 18;
+  let d = DSZ_TRAY, sp = Math.round(d * 1.42);
+  const need = () => 4 * sp + 2.9 * d;
+  if (need() > availR - availL){
+    d = Math.floor(d * (availR - availL) / need());
+    sp = Math.round(d * 1.42);
+  }
+  DSZ_TRAY = d; L.traySp = sp;
+  L.trayCx = (availL + availR) / 2 - .95 * d;
+  L.trayX0 = L.trayCx - 2 * sp - d * .95;
+  L.trayX1 = L.trayCx + 2 * sp + d * 2.85;
+}
+
+/* =======================================================================
+   ETAT
+   ======================================================================= */
+const G = {
+  state:'menu',            /* menu | play | over */
+  phase:'',                /* RECLAIM | ROLL | BONUS | CLAIM */
+  players:[], slots:[], bonus:null,
+  current:0, round:1, turnCount:0,
+  rollsLeft:0, over:false, sound:true,
+  nbPlayers:3, level:1,    /* 0 facile 1 normal 2 difficile */
+  log:[], hitBtns:[], flying:[], msg:'', cellCount:11, jokerCell:8, bonusCell:5,
+  uiResolve:null, endReason:'',
+  busy:false, hover:null, showHelp:false, hl:null,
+  tipSlot:null, tipT:0, tipForce:false, mouse:{x:0,y:0}, undoStack:[]
+};
+/* Réglages calibrés par duels IA contre IA (voir commentaires ci-dessous) :
+   - conservation : chercher tous les sous-ensembles de dés n'apporte rien et
+     coûte 7 fois plus cher — le biais du maximum sur des estimations bruitées
+     annule le gain. Mieux vaut peu de candidats et beaucoup de simulations.
+   - une deuxième relance simulée en profondeur dégrade le jeu, pour la même
+     raison. On reste à un niveau, avec 70 simulations par candidat.
+   - moduler la prudence selon l'avance au score s'est révélé contre-productif. */
+const LEVELS = [
+  {name:'Facile',    sims:3,  deny:.10, noise:.55, smart:false, exact:false, menace:0, sloppy:.45},
+  {name:'Normal',    sims:20, deny:.55, noise:.10, smart:true,  exact:false, menace:.70, oppint:false, endw:.5},
+  {name:'Difficile', sims:70, deny:.90, noise:0,   smart:true,  exact:true,  menace:.85, oppint:true,  endw:.5}
+];
+/* le niveau est porté par le joueur : permet de faire s'affronter deux IA */
+function LV(){
+  const p = G.players[G.current];
+  return LEVELS[(p && p.level !== undefined) ? p.level : G.level];
+}
+
+/* =======================================================================
+   TABLE DE MENACE
+   Probabilité qu'un joueur produise, en un tour (3 lancers, 5 dés, en
+   gardant ce qui sert), une combinaison capable de reprendre une carte.
+   C'est ce qui distingue une revendication solide d'une revendication
+   cosmétique : une Suite de 3 en 1-2-3 se reprend presque à coup sûr,
+   la même en 4-5-6 est imprenable.
+   ======================================================================= */
+const TH = {simple:[], same:{}, run:{}, ready:false};
+function comb(n, k){ let r = 1; for (let i = 0; i < k; i++) r = r * (n - i) / (i + 1); return r; }
+function mcSame(n, minFace, sims){
+  if (minFace >= 6) return 0;
+  let win = 0;
+  for (let s = 0; s < sims; s++){
+    let v = []; for (let i = 0; i < 5; i++) v.push(d6());
+    for (let r = 1; r < 3; r++){
+      let bf = 0, bc = -1;
+      for (let f = minFace + 1; f <= 6; f++){
+        let c = 0; for (const x of v) if (x === f) c++;
+        if (c > bc){ bc = c; bf = f; }
+      }
+      const keep = [];
+      for (const x of v) if (x === bf && keep.length < n) keep.push(x);
+      v = keep; while (v.length < 5) v.push(d6());
+    }
+    for (let f = minFace + 1; f <= 6; f++){
+      let c = 0; for (const x of v) if (x === f) c++;
+      if (c >= n){ win++; break; }
+    }
+  }
+  return win / sims;
+}
+function mcRun(n, minStart, sims){
+  if (minStart > 7 - n) return 0;
+  let win = 0;
+  for (let s = 0; s < sims; s++){
+    let v = []; for (let i = 0; i < 5; i++) v.push(d6());
+    for (let r = 1; r < 3; r++){
+      let bst = minStart, bc = -1;
+      for (let st = minStart; st <= 7 - n; st++){
+        let c = 0;
+        for (let k = 0; k < n; k++) if (v.indexOf(st + k) >= 0) c++;
+        if (c > bc){ bc = c; bst = st; }
+      }
+      const keep = [];
+      for (let k = 0; k < n; k++) if (v.indexOf(bst + k) >= 0) keep.push(bst + k);
+      v = keep; while (v.length < 5) v.push(d6());
+    }
+    for (let st = minStart; st <= 7 - n; st++){
+      let c = 0;
+      for (let k = 0; k < n; k++) if (v.indexOf(st + k) >= 0) c++;
+      if (c === n){ win++; break; }
+    }
+  }
+  return win / sims;
+}
+function initThreat(){
+  const p3 = 1 - Math.pow(5/6, 3);          /* proba qu'un dé finisse sur une face visée */
+  TH.simple[0] = 1;
+  for (let k = 1; k <= 7; k++){
+    let c = 0;
+    for (let i = k; i <= 5; i++) c += comb(5, i) * Math.pow(p3, i) * Math.pow(1 - p3, 5 - i);
+    TH.simple[k] = k > 5 ? 0 : c;
+  }
+  const S = 1200;
+  for (let n = 2; n <= 4; n++) for (let f = 0; f <= 6; f++) TH.same[n + ':' + f] = mcSame(n, f, S);
+  for (let n = 3; n <= 5; n++) for (let st = 1; st <= 6; st++) TH.run[n + ':' + st] = mcRun(n, st, S);
+  TH.ready = true;
+}
+function threatOf(slot, info){
+  if (!TH.ready) initThreat();
+  if (slot === G.bonus) return .55;
+  const c = slot.card.combo;
+  if (c.k === 'simple') return TH.simple[Math.min(7, info.len + 1)] || 0;
+  if (c.k === 'same')   return TH.same[c.n + ':' + info.face] || 0;
+  const myStart = Math.round((info.sum - c.n * (c.n - 1) / 2) / c.n);
+  return TH.run[c.n + ':' + (myStart + 1)] || 0;
+}
+
+/* "Vous encaissez" et non "Vous encaisse" : le joueur humain se conjugue
+   à la deuxième personne, les adversaires à la troisième. */
+function vb(p, you, other){ return p.isAI ? p.name + ' ' + other : 'Vous ' + you; }
+function logMsg(s, col){
+  G.log.unshift({s, col: col || PAL.ink2, t: performance.now()});
+  if (G.log.length > 40) G.log.pop();
+}
+
+function makeDie(owner, id){
+  return {id, owner, value:d6(), x:LAY.trayCx, y:LAY.trayY, z:0, rot:0, scale:1, sz:DSZ_TRAY,
+          at:null, sel:false, lock:false, flying:false};
+}
+
+const boardCx = () => LAY.panelX / 2;
+/* Replace toutes les cases et les dés déjà posés après un changement de
+   taille de fenêtre. */
+function repositionAll(){
+  if (!LAY.cells.length || !G.slots.length) return;
+  for (const s of G.slots){
+    const c = LAY.cells[s.cell]; if (!c) continue;
+    s.x = c.x; s.y = c.y;
+  }
+  const bc = LAY.cells[G.bonusCell];
+  if (bc){ G.bonus.x = bc.x; G.bonus.y = bc.y; }
+  const snap = slot => {
+    if (!slot.claim) return;
+    const pos = slotDicePos(slot, slot.claim.dice.length);
+    slot.claim.dice.forEach((d, i) => { d.x = pos[i].x; d.y = pos[i].y; d.z = 0; d.sz = DSZ_BOARD; });
+  };
+  for (const s of G.slots) snap(s);
+  snap(G.bonus);
+  if (G.bonus.holder < 0){
+    const bp = bonusDiePos();
+    G.bonus.bd.x = bp.x; G.bonus.bd.y = bp.y; G.bonus.bd.sz = DSZ_BONUS;
+  }
+  const p = G.players[G.current];
+  if (p){
+    const tp = trayPositions(p), bp = bonusTrayPos(p);
+    p.dice.forEach((d, i) => { if (d.at === null && i < p.active){ d.x = tp[i].x; d.y = tp[i].y; d.sz = DSZ_TRAY; } });
+    if (p.hasBonus){ G.bonus.bd.x = bp.x; G.bonus.bd.y = bp.y; G.bonus.bd.sz = DSZ_TRAY; }
+  }
+}
+
+function newGame(){
+  if (!(G.nbPlayers >= 2 && G.nbPlayers <= 5)) G.nbPlayers = 3;
+  if (!(G.level >= 0 && G.level <= 2)) G.level = 1;
+  G.players = []; G.slots = []; G.log = []; G.flying = []; G.over = false;
+  G.round = 1; G.turnCount = 0; G.state = 'play'; G.endReason = '';
+  parts.length = 0;
+
+  const names = ['Vous', 'Ada', 'Bruno', 'Clara'];
+  for (let i = 0; i < G.nbPlayers; i++){
+    const p = {
+      id:i, name:names[i], isAI: i > 0, row:DIE_ROW[i], hex:DIE_HEX[i],
+      level: i > 0 ? G.level : 2,
+      dice:[], coll:[], hasBonus:false, rolledBonus:false, active:5,
+      bonusDieRoll:0, hx:0, hy:0
+    };
+    for (let k = 0; k < 5; k++) p.dice.push(makeDie(i, k));
+    G.players.push(p);
+  }
+
+  /* pioche : 48 cartes + joker */
+  const deck = [];
+  for (let i = 0; i < 48; i++){
+    const combo = COMBOS[Math.floor(i / 4)];
+    deck.push({id:i, sprite:i, combo, motif:i % 4, pts:combo.pts});
+  }
+  for (let i = deck.length - 1; i > 0; i--){ const j = rnd(i + 1); const t = deck[i]; deck[i] = deck[j]; deck[j] = t; }
+
+  const nbPiles = G.nbPlayers === 2 ? 6 : (G.nbPlayers === 5 ? 12 : 9);
+  const perPile = G.nbPlayers === 2 ? 6 : (G.nbPlayers === 5 ? 3 : 4);
+  /* grille : les piles, la carte Joker et la zone du dé bonus occupent chacune
+     une case ; le joker prend le centre de la rangée du bas. */
+  G.cellCount = nbPiles + 2;
+  layout();
+  const topN = Math.ceil(G.cellCount / 2), botN = G.cellCount - topN;
+  G.jokerCell = topN + Math.floor(botN / 2);
+  G.bonusCell = topN - 1;
+  const free = [];
+  for (let i = 0; i < G.cellCount; i++) if (i !== G.jokerCell && i !== G.bonusCell) free.push(i);
+  for (let i = 0; i < nbPiles; i++){
+    const c = LAY.cells[free[i]];
+    G.slots.push({
+      idx:i, cell:free[i], joker:false, x:c.x, y:c.y,
+      pile: deck.splice(0, perPile), card:null, claim:null, flip:1, glow:0
+    });
+    G.slots[i].card = G.slots[i].pile.pop();
+  }
+  const jc = LAY.cells[G.jokerCell];
+  G.slots.push({
+    idx:nbPiles, cell:G.jokerCell, joker:true, x:jc.x, y:jc.y, pile:[], flip:1, glow:0, claim:null,
+    card:{id:48, sprite:48, combo:JOKER_COMBO, motif:-1, pts:15}
+  });
+
+  const bc = LAY.cells[G.bonusCell];
+  G.bonus.claim = null; G.bonus.holder = -1; G.bonus.glow = 0;
+  G.bonus.cell = G.bonusCell; G.bonus.x = bc.x; G.bonus.y = bc.y;
+  Object.assign(G.bonus.bd, {value:d6(), x:bc.x, y:bc.y - LAY.ch * .17, z:0, rot:0,
+                             scale:1, sz:DSZ_BONUS, at:null, sel:false, lock:false, flying:false});
+
+  G.current = rnd(G.nbPlayers);
+  refreshCtx();
+  logMsg(vb(G.players[G.current], 'commencez la partie.', 'commence la partie.'), PAL.orange);
+  turnLoop();
+}
+
+/* =======================================================================
+   REGLES : validite d'une revendication
+   ======================================================================= */
+function isRun(vals){
+  const s = [...vals].sort((a, b) => a - b);
+  for (let i = 1; i < s.length; i++) if (s[i] !== s[i-1] + 1) return false;
+  return true;
+}
+/* vals = valeurs des des poses ; slot = case visee ; pid = joueur.
+   Regles de delogement : meme combinaison et total superieur ;
+   pour une carte Simple, il faut simplement PLUS de des affichant la face. */
+function canClaim(slot, vals, pid){
+  if (!vals.length) return false;
+  return canClaimI(slot, infoOf(vals), pid);
+}
+
+function openSlots(){
+  const l = G.slots.filter(s => s.card);
+  l.push(G.bonus);
+  return l;
+}
+
+/* =======================================================================
+   SCORE
+   ======================================================================= */
+function scoreOf(p){
+  let cardPts = 0, hasJoker = false;
+  const counts = [0,0,0,0];
+  for (const c of p.coll){
+    cardPts += c.pts;
+    if (c.motif < 0) hasJoker = true; else counts[c.motif]++;
+  }
+  let bonus = 0;
+  for (let m = 0; m < 4; m++) bonus += serieBonus(counts[m]);
+  let jm = -1, jg = 0;
+  if (hasJoker){
+    for (let m = 0; m < 4; m++){
+      if (counts[m] < 12){
+        const g = serieBonus(counts[m] + 1) - serieBonus(counts[m]);
+        if (g > jg){ jg = g; jm = m; }
+      }
+    }
+    bonus += jg;
+  }
+  const bd = p.bonusDieRoll || 0;
+  return {cardPts, bonus, counts, hasJoker, jokerMotif:jm, jokerGain:jg, bonusDie:bd,
+          total: cardPts + bonus + bd};
+}
+/* gain marginal si le joueur ajoute une carte de ce motif (utilise par l'IA) */
+function marginal(p, motif, extra){
+  if (motif < 0) return 6;                         /* joker : valeur souple */
+  let n = extra || 0;
+  for (const c of p.coll) if (c.motif === motif) n++;
+  return serieBonus(n + 1) - serieBonus(n);
+}
+
+/* =======================================================================
+   MOTEUR DE DECISION (partage IA / suggestion joueur)
+   ======================================================================= */
+function infoOf(sub){
+  const len = sub.length; let s = 0, allSame = true; const f = sub[0];
+  for (let i = 0; i < len; i++){ s += sub[i]; if (sub[i] !== f) allSame = false; }
+  let run = true;
+  if (len > 1){
+    const a = [...sub].sort((x, y) => x - y);
+    for (let i = 1; i < len; i++) if (a[i] !== a[i-1] + 1){ run = false; break; }
+  }
+  return {len, sum:s, allSame, face:f, run};
+}
+function canClaimI(slot, info, pid){
+  const cur = slot.claim;
+  if (cur && cur.pid === pid) return false;
+  if (slot === G.bonus){
+    if (G.players[pid].rolledBonus) return false;
+    if (cur && info.sum <= cur.sum) return false;
+    return true;
+  }
+  if (!slot.card) return false;
+  const c = slot.card.combo;
+  if (c.k === 'simple'){
+    if (!info.allSame || info.face !== c.face) return false;
+    if (cur && info.len <= cur.dice.length) return false;
+    return true;
+  }
+  if (info.len !== c.n) return false;
+  if (c.k === 'same' && !info.allSame) return false;
+  if (c.k === 'run'  && !info.run)     return false;
+  if (cur && info.sum <= cur.sum) return false;
+  return true;
+}
+
+/* Contexte recalculé à chaque changement d'état du tableau : compteurs de
+   séries, projection des scores, avance ou retard du joueur courant. */
+let EVC = new Map();
+function refreshCtx(){
+  EVC = new Map();
+  const np = G.players.length;
+  const counts = [], pend = [];
+  for (const p of G.players){
+    const c = [0,0,0,0];
+    for (const x of p.coll) if (x.motif >= 0) c[x.motif]++;
+    counts.push(c); pend.push([0,0,0,0]);
+  }
+  const proj = G.players.map(p => scoreOf(p).total);
+  for (const s of G.slots){
+    if (!s.card || !s.claim) continue;
+    if (s.card.motif >= 0) pend[s.claim.pid][s.card.motif]++;
+    proj[s.claim.pid] += s.card.pts + 2;          /* carte quasi acquise */
+  }
+  const cur = G.current;
+  let other = -1e9;
+  for (let i = 0; i < np; i++) if (i !== cur) other = Math.max(other, proj[i]);
+  const lead = proj[cur] - other;
+  G.ctx = {counts, pend, proj, lead, nOpp:np - 1, endBonus: clamp(lead * .5, -11, 11)};
+}
+function motifCount(p, m){ return G.ctx.counts[p.id][m] + G.ctx.pend[p.id][m]; }
+/* gain de bonus de série si ce joueur ajoute cette carte */
+function marginalOf(p, card){
+  if (card.motif < 0){                            /* joker : rejoint la plus grosse série */
+    let best = 0;
+    for (let m = 0; m < 4; m++){
+      const n = motifCount(p, m);
+      if (n < 12) best = Math.max(best, serieBonus(n + 1) - serieBonus(n));
+    }
+    return best;
+  }
+  const n = motifCount(p, card.motif);
+  return serieBonus(n + 1) - serieBonus(n);
+}
+
+/* combien de cartes de ce motif ce joueur a-t-il deja pose des dessus ? */
+function pending(p, motif){
+  let n = 0;
+  for (const s of G.slots) if (s.card && s.claim && s.claim.pid === p.id && s.card.motif === motif) n++;
+  return n;
+}
+function slotValue(slot, p, info){
+  const L = LV();
+  if (!G.ctx) refreshCtx();
+  if (slot === G.bonus) return L.smart ? 4.3 : 3.4;
+  const c = slot.card;
+
+  if (!L.smart){                                   /* niveau Facile : vue courte */
+    let v = c.pts + marginalOf(p, c);
+    if (slot.claim) v += L.deny * (c.pts + marginalOf(G.players[slot.claim.pid], c));
+    v += c.combo.k === 'simple' ? (info.len - 1) * .3 : info.sum * .02;
+    return v;
+  }
+
+  let raw = c.pts + marginalOf(p, c);
+  /* concentrer un motif composé : chaque carte suivante vaut plus cher */
+  const conc = L.conc === undefined ? .32 : L.conc;
+  if (c.motif >= 0) raw += conc * Math.min(motifCount(p, c.motif), 8);
+  if (slot.claim){                                 /* déloger : je gagne ET il perd */
+    const op = G.players[slot.claim.pid];
+    raw += L.deny * (c.pts + marginalOf(op, c));
+  }
+  /* probabilité que la revendication tienne jusqu'à mon prochain tour */
+  const th = threatOf(slot, info);
+  let surv;
+  if (L.oppint){
+    /* chaque adversaire ne dépense ses dés que si la carte l'intéresse :
+       on pondère la menace par ce qu'elle lui rapporterait vraiment */
+    surv = 1;
+    for (const op of G.players){
+      if (op.id === p.id) continue;
+      const want = clamp(.12 + .055 * (c.pts + marginalOf(op, c)), .12, .92);
+      surv *= 1 - clamp(th * want * L.menace, 0, .95);
+    }
+  } else {
+    const interest = clamp(.26 + .05 * c.pts, .26, .85);
+    surv = Math.pow(1 - clamp(th * interest * L.menace, 0, .95), G.ctx.nOpp);
+  }
+  let v = raw * surv;
+  /* dernière carte d'une pile : la prendre déclenche la fin de partie */
+  const endw = L.endw === undefined ? 1 : L.endw;
+  if (endw && !slot.joker && !slot.pile.length)
+    v += clamp(G.ctx.endBonus * endw, -raw * .85, 11 * endw);
+  return v;
+}
+
+/* toutes les revendications possibles pour une main de valeurs */
+function buildOptions(vals, p){
+  const slots = openSlots(), n = vals.length, opts = [];
+  for (let mask = 1; mask < (1 << n); mask++){
+    const sub = [];
+    for (let i = 0; i < n; i++) if (mask & (1 << i)) sub.push(vals[i]);
+    const info = infoOf(sub);
+    for (const s of slots){
+      if (canClaimI(s, info, p.id)) opts.push({slot:s, mask, info, val:slotValue(s, p, info)});
+    }
+  }
+  return opts;
+}
+const bits = m => { let c = 0; while (m){ c += m & 1; m >>= 1; } return c; };
+
+/* glouton deux passes : bon compromis pour les simulations */
+function greedyValue(opts){
+  let best = 0;
+  for (let pass = 0; pass < 2; pass++){
+    const l = opts.slice().sort(pass ? (a, b) => b.val - a.val
+                                     : (a, b) => (b.val / bits(b.mask)) - (a.val / bits(a.mask)));
+    let used = 0, tot = 0;
+    for (const o of l) if (!(o.mask & used)){ used |= o.mask; tot += o.val; }
+    if (tot > best) best = tot;
+  }
+  return best;
+}
+function evalDice(vals, p){
+  const opts = buildOptions(vals, p);
+  return LV().exact ? solveOpts(opts).v : greedyValue(opts);
+}
+/* mémoïsation : pendant une phase de lancer le tableau ne bouge pas, et il
+   n'existe que 252 mains possibles — on ne calcule chaque main qu'une fois. */
+function evalDiceC(vals, p){
+  const k = 'd' + vals.slice().sort().join('');
+  let v = EVC.get(k);
+  if (v === undefined){ v = evalDice(vals, p); EVC.set(k, v); }
+  return v;
+}
+/* exact : programmation dynamique sur (case, des utilises) */
+function solveOpts(opts){
+  const bySlot = new Map();
+  for (const o of opts){
+    if (!bySlot.has(o.slot)) bySlot.set(o.slot, []);
+    bySlot.get(o.slot).push(o);
+  }
+  const keys = [...bySlot.keys()], memo = new Map();
+  function rec(i, used){
+    if (i >= keys.length) return {v:0, list:[]};
+    const key = i * 4096 + used;
+    if (memo.has(key)) return memo.get(key);
+    let best = rec(i + 1, used);                        /* on saute cette case */
+    for (const o of bySlot.get(keys[i])){
+      if (o.mask & used) continue;
+      const r = rec(i + 1, used | o.mask);
+      const v = r.v + o.val;
+      if (v > best.v) best = {v, list:[o, ...r.list]};
+    }
+    memo.set(key, best);
+    return best;
+  }
+  return rec(0, 0);
+}
+function bestPlan(vals, p){ return solveOpts(buildOptions(vals, p)).list; }
+/* plan légal mais pris au hasard : sert à rendre le niveau Facile abordable */
+function randomPlan(vals, p){
+  const opts = buildOptions(vals, p);
+  for (let i = opts.length - 1; i > 0; i--){ const j = rnd(i + 1); const t = opts[i]; opts[i] = opts[j]; opts[j] = t; }
+  let used = 0; const list = [];
+  for (const o of opts) if (!(o.mask & used)){ used |= o.mask; list.push(o); }
+  return list;
+}
+
+/* le de bonus ne revendique pas : il permet d'aligner UN de regulier sur sa face */
+function evalHand(vals, p, bonusVal){
+  if (!bonusVal) return evalDiceC(vals, p);
+  const k = 'h' + bonusVal + vals.slice().sort().join('');
+  let c = EVC.get(k);
+  if (c !== undefined) return c;
+  let best = evalDiceC(vals, p);
+  for (let i = 0; i < vals.length; i++){
+    if (vals[i] === bonusVal) continue;
+    const t = vals.slice(); t[i] = bonusVal;
+    const v = evalDiceC(t, p);
+    if (v > best) best = v;
+  }
+  EVC.set(k, best);
+  return best;
+}
+
+/* candidats de conservation entre deux lancers */
+function keepCandidates(vals){
+  const n = vals.length;
+  const out = new Set([0, (1 << n) - 1]);
+  for (let v = 1; v <= 6; v++){                        /* paquets de meme valeur */
+    let m = 0, part = 0, c = 0;
+    for (let i = 0; i < n; i++) if (vals[i] === v){ m |= 1 << i; if (++c <= 2) part |= 1 << i; }
+    if (m){ out.add(m); if (part !== m) out.add(part); }
+  }
+  for (let s = 1; s <= 6; s++){                        /* amorces de suite */
+    let m = 0;
+    for (let len = 0; len < 5 && s + len <= 6; len++){
+      const v = s + len; let idx = -1;
+      for (let i = 0; i < n; i++) if (vals[i] === v && !(m & (1 << i))){ idx = i; break; }
+      if (idx < 0) break;
+      m |= 1 << idx; out.add(m);
+    }
+  }
+  return [...out];
+}
+/* Quels dés garder entre deux lancers : on simule le reste du tour pour
+   chaque conservation candidate et on retient la meilleure espérance. */
+function aiKeepMask(p, vals, isB){
+  const L = LV(), cands = keepCandidates(vals);
+  const hasB = !!(isB && isB.some(Boolean));
+  const sims = hasB ? Math.max(6, Math.round(L.sims / 2)) : L.sims;
+  let best = 0, bestV = -1e9;
+  for (const m of cands){
+    let nRe = 0;
+    for (let i = 0; i < vals.length; i++) if (!(m & (1 << i))) nRe++;
+    const S = nRe === 0 ? 1 : sims;
+    let tot = 0;
+    for (let s = 0; s < S; s++){
+      const reg = []; let bv = 0;
+      for (let i = 0; i < vals.length; i++){
+        const v = (m & (1 << i)) ? vals[i] : d6();
+        if (isB && isB[i]) bv = v; else reg.push(v);
+      }
+      tot += evalHand(reg, p, bv);
+    }
+    const v = tot / S + (Math.random() - .5) * L.noise * 4;
+    if (v > bestV){ bestV = v; best = m; }
+  }
+  return best;
+}
+
+/* =======================================================================
+   POSITIONS
+   ======================================================================= */
+const PANEL_Y0 = 102;
+function panelRH(){ return Math.round(clamp((VH - PANEL_Y0 - 300) / Math.max(3, G.players.length || 3), 96, 132)); }
+function panelRow(i){
+  const h = panelRH();
+  return {x:LAY.panelX + 14, y:PANEL_Y0 + i * h, w:LAY.panelW - 28, h:h - 12};
+}
+function trayPositions(p){
+  const n = Math.max(1, p.active), sp = LAY.traySp, x0 = LAY.trayCx - (n - 1) * sp / 2, out = [];
+  for (let i = 0; i < 5; i++) out.push({x:x0 + i * sp, y:LAY.trayY});
+  return out;
+}
+function bonusTrayPos(p){
+  const n = Math.max(1, p.active);
+  return {x:LAY.trayCx + (n - 1) * LAY.traySp / 2 + DSZ_TRAY * 1.9, y:LAY.trayY};
+}
+/* Le dé bonus se pose dans le haut de sa case, les dés qui le revendiquent
+   dans le bas : les deux ne doivent jamais se recouvrir. */
+function bonusDiePos(){ return {x:G.bonus.x, y:G.bonus.y - LAY.ch * .17}; }
+/* les dés posés se rangent sur une ou deux rangées, comme sur une vraie carte */
+function slotDicePos(slot, n){
+  const bonus = slot === G.bonus;
+  const sz = DSZ_BOARD;
+  const wide = LAY.cw * (bonus ? .90 : .94);
+  const rows = n >= 4 ? 2 : 1;
+  const per = Math.ceil(n / rows);
+  const sp = Math.min(sz * 1.12, wide / per);
+  const baseY = slot.y + (bonus ? LAY.ch * .20 : LAY.ch * .13) + (rows > 1 ? -sz * .34 : 0);
+  const out = [];
+  for (let i = 0; i < n; i++){
+    const r = Math.floor(i / per), k = i % per, cnt = Math.min(per, n - r * per);
+    out.push({x:slot.x - (cnt - 1) * sp / 2 + k * sp, y:baseY + r * sz * .82});
+  }
+  return out;
+}
+function homeOf(p){
+  if (!p.isAI) return {x:LAY.trayCx, y:LAY.trayY + 70};
+  const r = panelRow(p.id);
+  return {x:r.x + 34, y:r.y + r.h / 2};
+}
+function collStackX(m){ return LAY.collX + LAY.collCard / 2 + m * (LAY.collW - LAY.collCard) / 4; }
+function collectPos(p, motif){
+  if (p.isAI){ const r = panelRow(p.id); return {x:r.x + r.w - 40, y:r.y + r.h / 2}; }
+  return {x:collStackX(motif < 0 ? 4 : motif), y:LAY.collY + Math.round(LAY.collCard / CARD_RATIO) / 2};
+}
+
+/* =======================================================================
+   ANIMATIONS
+   ======================================================================= */
+function moveDie(d, tx, ty, dur, arc, toSz){
+  const sx = d.x, sy = d.y, sz = d.z || 0;
+  const s0 = d.sz || DSZ_TRAY, s1 = toSz || s0;
+  const spin = (Math.random() < .5 ? -1 : 1) * (.4 + Math.random() * .8);
+  return anim(dur || .45, p => {
+    const e = easeInOut(p);
+    d.x = lerp(sx, tx, e); d.y = lerp(sy, ty, e);
+    d.z = lerp(sz, 0, e) + Math.sin(Math.PI * p) * (arc || 55);
+    d.rot = spin * Math.sin(Math.PI * p);
+    d.scale = 1 + Math.sin(Math.PI * p) * .16;
+    d.sz = lerp(s0, s1, e);
+  }).then(() => { d.x = tx; d.y = ty; d.z = 0; d.rot = 0; d.scale = 1; d.sz = s1; });
+}
+
+async function rollSome(p, dice){
+  if (!dice.length) return;
+  SFX.roll();
+  const tp = trayPositions(p), bp = bonusTrayPos(p);
+  const jobs = dice.map((d, i) => {
+    const t = d.isBonus ? bp : (tp[d.id] || tp[0]);
+    const sx = d.x, sy = d.y;
+    const dur = .78 + Math.random() * .18, delay = i * .05;
+    const spin = (Math.random() < .5 ? -1 : 1) * (2.2 + Math.random() * 2.4) * Math.PI;
+    const fin = d6();
+    const jitter = (Math.random() - .5) * 26;
+    let landed = false;
+    return anim(dur + delay, (_, raw) => {
+      let tt = (raw * (dur + delay) - delay) / dur;
+      if (tt < 0) return;
+      if (tt > 1) tt = 1;
+      const e = easeOut(tt);
+      d.x = lerp(sx, t.x + jitter, e);
+      d.y = lerp(sy, t.y, e);
+      d.z = hop(tt) * 128;
+      d.rot = spin * (1 - Math.pow(1 - tt, 2.2));
+      d.scale = 1 + hop(tt) * .18;
+      d.sz = lerp(d.sz || DSZ_TRAY, DSZ_TRAY, .25);
+      if (tt < .58) { if (Math.random() < .55) d.value = d6(); }
+      else d.value = fin;
+      if (!landed && tt > .6){ landed = true; SFX.land(); }
+    }).then(() => { d.value = fin; d.x = t.x; d.y = t.y; d.z = 0; d.rot = 0; d.scale = 1; d.sz = DSZ_TRAY; });
+  });
+  await Promise.all(jobs);
+}
+
+async function rollInPlace(d, x, y){
+  SFX.roll();
+  const fin = d6(), spin = (Math.random() < .5 ? -1 : 1) * 5 * Math.PI;
+  const sx = d.x, sy = d.y;
+  await anim(1, t => {
+    d.x = lerp(sx, x, easeOut(t)); d.y = lerp(sy, y, easeOut(t));
+    d.z = hop(t) * 150; d.rot = spin * (1 - Math.pow(1 - t, 2.2));
+    d.scale = 1 + hop(t) * .3;
+    d.value = t < .6 ? d6() : fin;
+  });
+  d.value = fin; d.z = 0; d.rot = 0; d.scale = 1; d.x = x; d.y = y; d.sz = 76;
+  return fin;
+}
+
+function flyCard(card, from, to, dur){
+  const f = {card, x:from.x, y:from.y, sc:1, rot:0, a:1};
+  G.flying.push(f);
+  return anim(dur || .55, p => {
+    const e = easeInOut(p);
+    f.x = lerp(from.x, to.x, e);
+    f.y = lerp(from.y, to.y, e) - Math.sin(Math.PI * p) * 60;
+    f.sc = lerp(1, .55, e); f.rot = Math.sin(Math.PI * p) * .3;
+    f.a = p > .85 ? 1 - (p - .85) / .15 : 1;
+  }).then(() => { const i = G.flying.indexOf(f); if (i >= 0) G.flying.splice(i, 1); });
+}
+async function flipIn(s){
+  SFX.card();
+  s.flip = 0;
+  await anim(.42, p => { s.flip = p; }, easeInOut);
+  s.flip = 1;
+}
+async function bumpAway(claim){
+  const own = G.players[claim.pid], h = homeOf(own);
+  const dice = claim.dice.slice();
+  dice.forEach(d => { d.at = null; d.flying = true; });
+  await Promise.all(dice.map((d, i) => {
+    const sx = d.x, sy = d.y;
+    const ang = Math.random() * Math.PI * 2;
+    const mx = sx + Math.cos(ang) * 90, my = sy + Math.sin(ang) * 70 - 40;
+    const spin = (Math.random() < .5 ? -1 : 1) * 4;
+    return anim(.55 + i * .04, p => {
+      const e = easeIn(p);
+      const ax = lerp(sx, mx, Math.min(1, p * 2.4)), ay = lerp(sy, my, Math.min(1, p * 2.4));
+      d.x = lerp(ax, h.x, e); d.y = lerp(ay, h.y, e);
+      d.z = Math.sin(Math.PI * p) * 70;
+      d.rot = spin * p; d.scale = 1 - p * .35; d.sz = lerp(DSZ_BOARD, DSZ_TRAY, p);
+    });
+  }));
+  dice.forEach(d => { d.flying = false; d.scale = 1; d.rot = 0; d.z = 0; d.sz = DSZ_TRAY; d.x = h.x; d.y = h.y; });
+}
+
+/* =======================================================================
+   ACTIONS DE JEU
+   ======================================================================= */
+function waitUI(){ return new Promise(r => { G.uiResolve = r; }); }
+function resolveUI(v){ const r = G.uiResolve; if (r){ G.uiResolve = null; r(v); } }
+
+async function placeClaim(p, slot, dice){
+  G.busy = true;
+  const vals = dice.map(d => d.value);
+  const prev = slot.claim;
+  if (slot.claim){
+    const old = slot.claim;
+    slot.claim = null;
+    const vic = G.players[old.pid];
+    logMsg(p.isAI ? (vic.isAI ? p.name + ' déloge ' + vic.name : p.name + ' vous déloge')
+                  : 'Vous délogez ' + vic.name, '#ff8a5c');
+    SFX.bump();
+    await bumpAway(old);
+  }
+  const pos = slotDicePos(slot, dice.length);
+  dice.forEach(d => { d.at = slot; d.sel = false; });
+  slot.claim = {pid:p.id, dice, sum:sum(vals)};
+  SFX.place();
+  await Promise.all(dice.map((d, i) => moveDie(d, pos[i].x, pos[i].y, .4, 52, DSZ_BOARD)));
+  slot.glow = 1;
+  burst(slot.x, slot.y + 20, p.hex, 9);
+  if (slot === G.bonus)
+    logMsg(vb(p, 'visez', 'vise') + ' le dé bonus (' + sum(vals) + ')', p.hex);
+  else
+    logMsg(vb(p, 'revendiquez', 'revendique') + ' ' + slot.card.combo.lbl +
+           ' (' + slot.card.pts + (slot.card.pts > 1 ? ' pts)' : ' pt)'), p.hex);
+  G.undoStack.push({slot, dice:dice.slice(), prev});
+  refreshCtx();
+  G.busy = false;
+}
+
+/* Annulation d'une pose faite pendant ce tour : les dés reviennent dans la
+   main et l'adversaire éventuellement délogé retrouve sa carte. */
+function canUndo(slot){
+  const p = G.players[G.current];
+  return !p.isAI && G.phase === 'CLAIM' && slot.claim && slot.claim.pid === p.id
+         && G.undoStack.some(u => u.slot === slot);
+}
+async function undoPlace(slot){
+  const e = G.undoStack.find(u => u.slot === slot);
+  if (!e) return false;
+  G.busy = true;
+  const p = G.players[G.current], tp = trayPositions(p);
+  slot.claim = null;
+  e.dice.forEach(d => { d.at = null; d.sel = false; });
+  blip(520, .1, 'triangle', .09, 300);
+  await Promise.all(e.dice.map(d => moveDie(d, (tp[d.id] || tp[0]).x, (tp[d.id] || tp[0]).y, .38, 55, DSZ_TRAY)));
+  if (e.prev){                                   /* on remet le joueur délogé */
+    const pos = slotDicePos(slot, e.prev.dice.length);
+    e.prev.dice.forEach(d => d.at = slot);
+    slot.claim = e.prev;
+    SFX.place();
+    await Promise.all(e.prev.dice.map((d, i) => moveDie(d, pos[i].x, pos[i].y, .38, 48, DSZ_BOARD)));
+    logMsg('Annulation : ' + G.players[e.prev.pid].name + ' retrouve sa carte', PAL.ink2);
+  } else {
+    logMsg('Annulation : vous reprenez vos dés', PAL.ink2);
+  }
+  G.undoStack.splice(G.undoStack.indexOf(e), 1);
+  refreshCtx();
+  G.busy = false;
+  return true;
+}
+
+async function doReclaim(p){
+  G.phase = 'RECLAIM';
+  p.active = G.turnCount <= 2 ? 2 + G.turnCount : 5;
+  p.rolledBonus = false;
+  const tp = trayPositions(p), home = homeOf(p);
+  for (const d of p.dice) if (d.at === null){ d.x = home.x; d.y = home.y; d.z = 0; d.rot = 0; d.scale = 1; }
+
+  const mine = G.slots.filter(s => s.claim && s.claim.pid === p.id);
+  const jobs = [];
+  let pileOut = false, got = 0;
+
+  for (let k = 0; k < mine.length; k++){
+    const s = mine[k];
+    const dice = s.claim.dice.slice(), card = s.card;
+    s.claim = null;
+    dice.forEach(d => d.at = null);
+    jobs.push((async () => {
+      await wait(k * 130);
+      const to = collectPos(p, card.motif), from = {x:s.x, y:s.y};
+      s.card = null;
+      SFX.claim();
+      await Promise.all([
+        flyCard(card, from, to, .55),
+        ...dice.map(d => moveDie(d, (tp[d.id] || tp[0]).x, (tp[d.id] || tp[0]).y, .5, 62, DSZ_TRAY))
+      ]);
+      p.coll.push(card); got++;
+      burst(to.x, to.y, card.motif < 0 ? PAL.orange : MOTIF_COL[card.motif], 12);
+      if (!s.joker){
+        if (s.pile.length){ s.card = s.pile.pop(); await flipIn(s); }
+        else pileOut = true;
+      }
+    })());
+  }
+  if (G.bonus.claim && G.bonus.claim.pid === p.id){
+    const dice = G.bonus.claim.dice.slice();
+    G.bonus.claim = null;
+    dice.forEach(d => d.at = null);
+    p.hasBonus = true; G.bonus.holder = p.id;
+    logMsg(vb(p, 'emportez', 'emporte') + ' le dé bonus', '#ffffff');
+    jobs.push(Promise.all(dice.map(d => moveDie(d, (tp[d.id] || tp[0]).x, (tp[d.id] || tp[0]).y, .5, 62, DSZ_TRAY))));
+  }
+  await Promise.all(jobs);
+  for (let i = 0; i < p.active; i++){
+    const d = p.dice[i];
+    if (d.at === null){ d.x = tp[i].x; d.y = tp[i].y; d.z = 0; d.rot = 0; d.scale = 1; }
+  }
+  if (got){
+    const c = got + ' carte' + (got > 1 ? 's' : '');
+    logMsg(vb(p, 'encaissez ' + c, 'encaisse ' + c), p.hex);
+  }
+  refreshCtx();
+  if (pileOut){ G.over = true; G.endReason = 'pile'; }
+}
+
+async function doRoll(p){
+  G.phase = 'ROLL'; G.rollsLeft = 3;
+  refreshCtx();
+  p.dice.forEach(d => { d.lock = false; d.sel = false; });
+  const act = p.dice.slice(0, p.active);
+  if (p.hasBonus){
+    p.rolledBonus = true;
+    G.bonus.bd.lock = false;
+    act.push(G.bonus.bd);
+    await moveDie(G.bonus.bd, bonusTrayPos(p).x, bonusTrayPos(p).y, .4, 60, DSZ_TRAY);
+  }
+  if (p.isAI) await wait(300);
+  await rollSome(p, act);
+  G.rollsLeft--;
+  while (G.rollsLeft > 0){
+    if (p.isAI){
+      await wait(340);
+      const vals = act.map(d => d.value);
+      const mask = aiKeepMask(p, vals, act.map(d => !!d.isBonus));
+      act.forEach((d, i) => d.lock = !!(mask & (1 << i)));
+      const toRoll = act.filter(d => !d.lock);
+      if (!toRoll.length) break;
+      await wait(300);
+      await rollSome(p, toRoll);
+      G.rollsLeft--;
+    } else {
+      const a = await waitUI();
+      if (a === 'stop') break;
+      const toRoll = act.filter(d => !d.lock);
+      if (!toRoll.length) break;
+      await rollSome(p, toRoll);
+      G.rollsLeft--;
+    }
+  }
+  act.forEach(d => d.lock = false);
+}
+
+async function applyBonusAdjust(p, die){
+  const v = G.bonus.bd.value;
+  await anim(.45, t => {
+    die.z = Math.sin(Math.PI * t) * 60;
+    die.rot = t * Math.PI * 3;
+    die.scale = 1 + Math.sin(Math.PI * t) * .3;
+    if (t < .7) die.value = d6(); else die.value = v;
+  });
+  die.value = v; die.rot = 0; die.z = 0; die.scale = 1;
+  SFX.claim();
+  burst(die.x, die.y, '#ffffff', 10);
+  logMsg(vb(p, 'alignez', 'aligne') + ' un dé sur le bonus (' + v + ')', '#ffffff');
+}
+
+async function doBonusAdjust(p){
+  G.phase = 'BONUS';
+  const act = p.dice.slice(0, p.active);
+  if (p.isAI){
+    await wait(420);
+    const vals = act.map(d => d.value);
+    let best = evalDice(vals, p), bi = -1;
+    for (let i = 0; i < vals.length; i++){
+      if (vals[i] === G.bonus.bd.value) continue;
+      const t = vals.slice(); t[i] = G.bonus.bd.value;
+      const v = evalDice(t, p);
+      if (v > best + .01){ best = v; bi = i; }
+    }
+    if (bi >= 0) await applyBonusAdjust(p, act[bi]);
+  } else {
+    const a = await waitUI();
+    if (a && a.die) await applyBonusAdjust(p, a.die);
+  }
+  p.hasBonus = false; G.bonus.holder = -1;
+  const bp = bonusDiePos();
+  await moveDie(G.bonus.bd, bp.x, bp.y, .45, 60, DSZ_BONUS);
+}
+
+async function doClaim(p){
+  G.phase = 'CLAIM';
+  G.undoStack = [];
+  refreshCtx();
+  if (p.isAI){
+    await wait(420);
+    const act = p.dice.slice(0, p.active).filter(d => d.at === null);
+    const L = LV();
+    const plan = (L.sloppy && Math.random() < L.sloppy)
+               ? randomPlan(act.map(d => d.value), p)
+               : bestPlan(act.map(d => d.value), p);
+    if (!plan.length){ logMsg(p.name + ' ne peut rien revendiquer', PAL.ink2); await wait(600); }
+    for (const o of plan){
+      const dice = [];
+      for (let i = 0; i < act.length; i++) if (o.mask & (1 << i)) dice.push(act[i]);
+      if (dice.some(d => d.at !== null)) continue;
+      await placeClaim(p, o.slot, dice);
+      await wait(240);
+    }
+  } else {
+    await waitUI();
+  }
+}
+
+async function turnLoop(){
+  while (!G.over){
+    const p = G.players[G.current];
+    G.turnCount++;
+    await doReclaim(p);
+    if (G.over) break;
+    await doRoll(p);
+    if (p.hasBonus) await doBonusAdjust(p);
+    await doClaim(p);
+    p.dice.forEach(d => { d.sel = false; d.lock = false; });
+    G.current = (G.current + 1) % G.players.length;
+    await wait(180);
+  }
+  await endGame();
+}
+
+async function endGame(){
+  G.phase = '';
+  logMsg('La pile est vide : fin de la partie !', PAL.orange);
+  await wait(400);
+  for (const s of G.slots){
+    if (s.claim && s.card){
+      const p = G.players[s.claim.pid], card = s.card;
+      const from = {x:s.x, y:s.y}, to = collectPos(p, card.motif);
+      s.card = null;
+      s.claim.dice.forEach(d => { d.at = null; d.flying = false; });
+      s.claim = null;
+      SFX.card();
+      await flyCard(card, from, to, .4);
+      p.coll.push(card);
+      burst(to.x, to.y, card.motif < 0 ? PAL.orange : MOTIF_COL[card.motif], 10);
+    }
+  }
+  let holder = -1;
+  if (G.bonus.claim) holder = G.bonus.claim.pid;
+  else if (G.bonus.holder >= 0) holder = G.bonus.holder;
+  if (holder >= 0){
+    const p = G.players[holder];
+    logMsg(vb(p, 'lancez', 'lance') + ' le dé bonus', '#ffffff');
+    const v = await rollInPlace(G.bonus.bd, boardCx(), LAY.top + LAY.boardH / 2);
+    p.bonusDieRoll = v;
+    await wait(500);
+  }
+  G.state = 'over';
+  SFX.win();
+  const best = G.players.slice().sort((a, b) => scoreOf(b).total - scoreOf(a).total)[0];
+  logMsg(vb(best, 'remportez la partie', 'remporte la partie'), PAL.orange);
+}
+
+/* =======================================================================
+   RENDU
+   ======================================================================= */
+const PIPS = {
+  1:[[0,0]], 2:[[-1,-1],[1,1]], 3:[[-1,-1],[0,0],[1,1]],
+  4:[[-1,-1],[1,-1],[-1,1],[1,1]], 5:[[-1,-1],[1,-1],[0,0],[-1,1],[1,1]],
+  6:[[-1,-1],[1,-1],[-1,0],[1,0],[-1,1],[1,1]]
+};
+const FALLBACK_DIE = ['#1e8ba6','#cf2b3c','#7d3b8f','#6f9c3a','#20262a','#7a4a28','#f2efe4'];
+
+function drawDieFace(v, col, s){
+  const dark = col === '#f2efe4';
+  CX.fillStyle = col;
+  rr(-s/2, -s/2, s, s, s*.22); CX.fill();
+  CX.strokeStyle = 'rgba(0,0,0,.35)'; CX.lineWidth = Math.max(1, s*.04); CX.stroke();
+  CX.fillStyle = 'rgba(255,255,255,.22)';
+  rr(-s/2+s*.09, -s/2+s*.09, s*.82, s*.3, s*.12); CX.fill();
+  CX.fillStyle = dark ? '#1a1a1a' : '#fff';
+  for (const p of PIPS[v]){
+    CX.beginPath(); CX.arc(p[0]*s*.26, p[1]*s*.26, s*.085, 0, 6.3); CX.fill();
+  }
+}
+function drawDie(val, row, x, y, size, rot, scale, alpha){
+  CX.save();
+  CX.globalAlpha = alpha === undefined ? 1 : alpha;
+  CX.translate(x, y);
+  if (rot) CX.rotate(rot);
+  const s = size * (scale || 1);
+  if (IMG.dice){
+    const cw = IMG.dice.width / 6, ch = IMG.dice.height / 7;
+    const h = s * (ch / cw);
+    CX.drawImage(IMG.dice, (val - 1) * cw, row * ch, cw, ch, -s/2, -h/2, s, h);
+  } else {
+    drawDieFace(val, FALLBACK_DIE[row], s);
+  }
+  CX.restore();
+}
+function drawDieObj(d){
+  const s = d.sz || 46;
+  const row = d.isBonus ? DIE_BONUS_ROW : DIE_ROW[d.owner];
+  const z = d.z || 0;
+  CX.save();
+  CX.globalAlpha = .38 * clamp(1 - z / 260, .15, 1);
+  CX.fillStyle = '#000';
+  CX.beginPath();
+  CX.ellipse(d.x, d.y + s * .40, s * .40 * clamp(1 - z/360, .4, 1), s * .15 * clamp(1 - z/420, .4, 1), 0, 0, 6.3);
+  CX.fill();
+  CX.restore();
+  if (d.sel){
+    CX.save();
+    CX.strokeStyle = PAL.orange; CX.lineWidth = 3;
+    CX.globalAlpha = .55 + Math.sin(performance.now() / 160) * .35;
+    CX.beginPath(); CX.arc(d.x, d.y - z, s * .72, 0, 6.3); CX.stroke();
+    CX.restore();
+  }
+  drawDie(d.value, row, d.x, d.y - z, s, d.rot, d.scale);
+  if (d.lock){
+    const bw = s * .70, bh = s * .30;
+    CX.save();
+    CX.globalAlpha = .95;
+    CX.fillStyle = PAL.orange;
+    rr(d.x - bw/2, d.y - z + s * .40, bw, bh, bh/2); CX.fill();
+    txt('GARDÉ', d.x, d.y - z + s * .40 + bh/2, s * .19, '#20140c', 'center');
+    CX.restore();
+  }
+}
+
+/* ---------- carte ---------- */
+function motifPattern(m, w, h){
+  const bg = m < 0 ? '#e9e2c6' : MOTIF_BG[m];
+  const fg = m < 0 ? '#e0952f' : MOTIF_FG[m];
+  CX.fillStyle = bg; CX.fillRect(-w/2, -h/2, w, h);
+  CX.fillStyle = fg;
+  const step = w / 3.4;
+  for (let y = -h/2; y < h/2 + step; y += step){
+    for (let x = -w/2; x < w/2 + step; x += step){
+      CX.save(); CX.translate(x + step/2, y + step/2);
+      if (m === 1 || m < 0){ CX.beginPath(); CX.arc(0, 0, step*.34, 0, 6.3); CX.fill(); }
+      else if (m === 2){ CX.beginPath();
+        for (let i = 0; i < 6; i++){ const a = i*Math.PI/3; if(i) CX.lineTo(Math.cos(a)*step*.36, Math.sin(a)*step*.36); else CX.moveTo(Math.cos(a)*step*.36, Math.sin(a)*step*.36); }
+        CX.closePath(); CX.fill(); }
+      else if (m === 3){ CX.rotate(Math.PI/4); rr(-step*.26, -step*.26, step*.52, step*.52, step*.1); CX.fill(); }
+      else { rr(-step*.28, -step*.3, step*.56, step*.6, step*.16); CX.fill(); }
+      CX.restore();
+    }
+  }
+}
+function drawComboSymbol(combo, x, y, sc){
+  CX.save(); CX.translate(x, y); CX.scale(sc, sc);
+  CX.fillStyle = '#fff'; CX.strokeStyle = '#1b1b1b'; CX.lineWidth = 1.6;
+  if (combo.k === 'simple'){
+    rr(-13, -13, 26, 26, 6); CX.fill(); CX.stroke();
+    CX.fillStyle = '#1b1b1b';
+    for (const p of PIPS[combo.face]){ CX.beginPath(); CX.arc(p[0]*7, p[1]*7, 2.6, 0, 6.3); CX.fill(); }
+  } else if (combo.k === 'same'){
+    const n = combo.n, w = 15, tot = n * w;
+    for (let i = 0; i < n; i++){
+      rr(-tot/2 + i*w + 1, -8, w - 2, 17, 4); CX.fill(); CX.stroke();
+    }
+  } else {
+    const n = combo.n, w = 11;
+    for (let i = 0; i < n; i++){
+      rr(-n*w/2 + i*w, -10 + i*2.2, w + 4, 18, 3); CX.fill(); CX.stroke();
+    }
+  }
+  CX.restore();
+}
+function drawCardFallback(card, w, h){
+  motifPattern(card.motif, w, h);
+  CX.fillStyle = 'rgba(0,0,0,.10)'; CX.fillRect(-w/2, -h/2, w, h);
+  const pts = card.pts;
+  CX.save();
+  CX.font = "italic 800 " + (w*.20) + "px 'Trebuchet MS',sans-serif";
+  CX.textAlign = 'left'; CX.textBaseline = 'top';
+  CX.lineWidth = 3; CX.strokeStyle = '#1b1b1b'; CX.fillStyle = '#fff';
+  CX.strokeText(pts, -w/2 + 5, -h/2 + 3); CX.fillText(pts, -w/2 + 5, -h/2 + 3);
+  CX.save(); CX.rotate(Math.PI); CX.textAlign = 'left'; CX.textBaseline = 'top';
+  CX.strokeText(pts, -w/2 + 5, -h/2 + 3); CX.fillText(pts, -w/2 + 5, -h/2 + 3);
+  CX.restore();
+  CX.restore();
+  drawComboSymbol(card.combo, 0, 0, w / 90);
+}
+function drawCardAt(card, x, y, w, h, o){
+  o = o || {};
+  CX.save();
+  CX.globalAlpha = o.a === undefined ? 1 : o.a;
+  CX.translate(x, y);
+  if (o.rot) CX.rotate(o.rot);
+  if (o.sc) CX.scale(o.sc, o.sc);
+  if (o.sx !== undefined) CX.scale(o.sx, 1);
+  if (o.shadow !== false) shadow('rgba(0,0,0,.55)', 16, 0, 7);
+  CX.fillStyle = '#0e1a1b'; rr(-w/2, -h/2, w, h, 9); CX.fill();
+  noShadow();
+  CX.save(); rr(-w/2, -h/2, w, h, 9); CX.clip();
+  if (IMG.cards){
+    const cw = IMG.cards.width / 10, ch = IMG.cards.height / 5;
+    CX.drawImage(IMG.cards, (card.sprite % 10) * cw + 1.5, Math.floor(card.sprite / 10) * ch + 1.5,
+                 cw - 3, ch - 3, -w/2, -h/2, w, h);
+  } else drawCardFallback(card, w, h);
+  CX.restore();
+  CX.strokeStyle = 'rgba(237,230,206,.32)'; CX.lineWidth = 2;
+  rr(-w/2, -h/2, w, h, 9); CX.stroke();
+  CX.restore();
+}
+function drawCardBack(x, y, w, h, o){
+  o = o || {};
+  CX.save();
+  CX.globalAlpha = o.a === undefined ? 1 : o.a;
+  CX.translate(x, y);
+  if (o.sx !== undefined) CX.scale(o.sx, 1);
+  if (o.shadow !== false) shadow('rgba(0,0,0,.5)', 12, 0, 5);
+  CX.fillStyle = '#20393b'; rr(-w/2, -h/2, w, h, 9); CX.fill();
+  noShadow();
+  CX.save(); rr(-w/2, -h/2, w, h, 9); CX.clip();
+  CX.strokeStyle = 'rgba(225,102,46,.5)'; CX.lineWidth = w * .018;
+  const st = w * .17;
+  for (let i = -3; i < 8; i++){
+    CX.beginPath(); CX.arc(-w/2 + i * st, h/2 - i * st * .32, w * .15, 0, 6.3); CX.stroke();
+  }
+  CX.fillStyle = 'rgba(237,230,206,.85)';
+  CX.font = "italic 800 " + (w * .15) + "px 'Trebuchet MS',sans-serif";
+  CX.textAlign = 'center'; CX.textBaseline = 'middle';
+  CX.fillText("Roll'n", 0, -w * .09); CX.fillText('Bump', 0, w * .09);
+  CX.restore();
+  CX.strokeStyle = 'rgba(237,230,206,.28)'; CX.lineWidth = 2;
+  rr(-w/2, -h/2, w, h, 9); CX.stroke();
+  CX.restore();
+}
+
+/* ---------- plateau ---------- */
+function drawSlot(s){
+  const w = LAY.cw, h = LAY.ch;
+  const back = Math.min(s.pile.length, 4);
+  for (let i = back; i >= 1; i--) drawCardBack(s.x + i * 4, s.y + i * 5, w, h, {shadow:i === back});
+  if (s.card){
+    if (s.flip !== undefined && s.flip < 1){
+      const sx = Math.abs(Math.cos(Math.PI * s.flip));
+      if (s.flip < .5) drawCardBack(s.x, s.y, w, h, {sx});
+      else drawCardAt(s.card, s.x, s.y, w, h, {sx});
+    } else {
+      drawCardAt(s.card, s.x, s.y, w, h);
+    }
+  } else if (!s.pile.length && !s.joker){
+    CX.save(); CX.globalAlpha = .3; CX.setLineDash([6, 6]);
+    CX.strokeStyle = PAL.ink; CX.lineWidth = 2; rr(s.x - w/2, s.y - h/2, w, h, 9); CX.stroke();
+    CX.restore();
+  }
+  if (s.pile.length && s.card){
+    const label = s.pile.length + 1, bw = Math.max(74, w * .58);
+    CX.save();
+    CX.fillStyle = 'rgba(8,16,17,.82)';
+    rr(s.x - bw/2, s.y + h/2 + 6, bw, 25, 12); CX.fill();
+    txt(label + ' carte' + (label > 1 ? 's' : ''), s.x, s.y + h/2 + 18, 14, PAL.ink2, 'center', '600');
+    CX.restore();
+  }
+  if (s.joker && s.card){
+    const bw = Math.max(90, w * .62);
+    CX.save();
+    CX.fillStyle = 'rgba(225,102,46,.85)';
+    rr(s.x - bw/2, s.y + h/2 + 6, bw, 25, 12); CX.fill();
+    txt('CARTE JOKER', s.x, s.y + h/2 + 18, 14, '#1b0f08', 'center', '800');
+    CX.restore();
+  }
+  if (s.glow > 0){
+    CX.save();
+    CX.globalAlpha = s.glow * .8;
+    CX.strokeStyle = '#fff'; CX.lineWidth = 4;
+    rr(s.x - w/2 - 4, s.y - h/2 - 4, w + 8, h + 8, 12); CX.stroke();
+    CX.restore();
+  }
+}
+function drawHighlight(s, col, strong){
+  const bw = LAY.cw + 14, bh = LAY.ch + 14, y = s.y;
+  const pulse = .5 + Math.sin(performance.now() / (strong ? 230 : 520)) * .5;
+  CX.save();
+  CX.globalAlpha = strong ? (.72 + pulse * .28) : (.5 + pulse * .22);
+  CX.strokeStyle = col; CX.lineWidth = strong ? 5 : 3.5;
+  shadow(col, strong ? 26 : 15, 0, 0);
+  rr(s.x - bw/2, y - bh/2, bw, bh, 14); CX.stroke();
+  if (strong){
+    CX.globalAlpha = .16;
+    CX.fillStyle = col; rr(s.x - bw/2, y - bh/2, bw, bh, 14); CX.fill();
+  }
+  CX.restore();
+  noShadow();
+}
+/* assombrit les cartes qu'aucune combinaison ne peut prendre ce tour-ci */
+function drawVeil(s){
+  CX.save();
+  CX.globalAlpha = .58; CX.fillStyle = '#060e0f';
+  rr(s.x - LAY.cw/2, s.y - LAY.ch/2, LAY.cw, LAY.ch, 9); CX.fill();
+  CX.restore();
+}
+function drawBonusZone(){
+  const b = G.bonus, w = LAY.cw, h = LAY.ch;
+  CX.save();
+  CX.fillStyle = 'rgba(237,230,206,.05)';
+  CX.strokeStyle = 'rgba(237,230,206,.32)'; CX.lineWidth = 2.5;
+  CX.setLineDash([10, 8]);
+  rr(b.x - w/2, b.y - h/2, w, h, 12); CX.fill(); CX.stroke();
+  CX.restore();
+  txt('DÉ BONUS', b.x, b.y - h/2 + 26, Math.round(w * .105), PAL.ink2, 'center', '700');
+  if (!b.claim)
+    txt('posez-y vos dés inutilisés', b.x, b.y + h * .04,
+        Math.round(w * .072), 'rgba(237,230,206,.38)', 'center', '600');
+  if (b.glow > 0){
+    CX.save(); CX.globalAlpha = b.glow * .8; CX.strokeStyle = '#fff'; CX.lineWidth = 3;
+    rr(b.x - w/2 - 4, b.y - h/2 - 4, w + 8, h + 8, 14); CX.stroke(); CX.restore();
+  }
+}
+
+/* ---------- boutons ---------- */
+function uiBtn(id, x, y, w, h, label, style, enabled){
+  const on = enabled !== false;
+  const hot = G.hover === id && on;
+  CX.save();
+  CX.globalAlpha = on ? 1 : .35;
+  if (style === 'primary'){
+    if (hot) shadow('rgba(225,102,46,.6)', 20, 0, 0);
+    const g = CX.createLinearGradient(0, y, 0, y + h);
+    g.addColorStop(0, hot ? '#f4813f' : '#e1662e'); g.addColorStop(1, hot ? '#d55a24' : '#b94b1d');
+    CX.fillStyle = g; rr(x, y, w, h, 11); CX.fill(); noShadow();
+    txt(label, x + w/2, y + h/2 + 1, h > 46 ? 19 : 16, '#fff5e8', 'center', '700');
+  } else {
+    CX.fillStyle = hot ? 'rgba(237,230,206,.14)' : 'rgba(237,230,206,.06)';
+    rr(x, y, w, h, 11); CX.fill();
+    CX.strokeStyle = hot ? PAL.ink : PAL.line; CX.lineWidth = 1.5; CX.stroke();
+    txt(label, x + w/2, y + h/2 + 1, h > 46 ? 17 : 15, PAL.ink, 'center', '600');
+  }
+  CX.restore();
+  if (on) G.hitBtns.push({id, x, y, w, h});
+}
+
+/* ---------- fond ---------- */
+function drawBg(){
+  const g = CX.createRadialGradient(boardCx(), LAY.top + LAY.boardH / 2, 60,
+                                   boardCx(), LAY.top + LAY.boardH / 2, VW * .62);
+  g.addColorStop(0, '#1b3133'); g.addColorStop(.55, '#132325'); g.addColorStop(1, '#0b1415');
+  CX.fillStyle = g; CX.fillRect(0, 0, VW, VH);
+  CX.save();
+  CX.fillStyle = 'rgba(237,230,206,.035)';
+  rr(LAY.feltX, LAY.feltY, LAY.feltW, LAY.feltH, 30); CX.fill();
+  CX.strokeStyle = 'rgba(237,230,206,.10)'; CX.lineWidth = 2; CX.stroke();
+  CX.restore();
+}
+
+/* ---------- bandeau haut ---------- */
+function drawTopBar(){
+  const p = G.players[G.current];
+  CX.save();
+  CX.font = "italic 800 32px 'Trebuchet MS',sans-serif";
+  CX.fillStyle = PAL.orange; CX.textAlign = 'left'; CX.textBaseline = 'middle';
+  CX.fillText("Roll'n Bump", 28, 34);
+  CX.restore();
+
+  let label = '', sub = '';
+  if (G.state === 'play'){
+    if (G.phase === 'ROLL')    { label = p.isAI ? p.name + ' lance les dés' : 'À vous de jouer';
+                                 sub = 'Lancer ' + (4 - G.rollsLeft - 1) + '/3 — cliquez un dé pour le garder'; }
+    else if (G.phase === 'CLAIM'){ label = p.isAI ? p.name + ' revendique' : 'Revendication';
+                                 sub = 'Cliquez une carte pour poser · re-cliquez pour annuler'; }
+    else if (G.phase === 'BONUS'){ label = 'Dé bonus'; sub = 'Alignez un dé sur le bonus, ou passez'; }
+    else if (G.phase === 'RECLAIM'){ label = p.name + ' récupère ses dés'; sub = ''; }
+    if (p.isAI) sub = 'Tour de ' + p.name;
+  }
+  const cx = boardCx(), w = clamp(VW * .34, 460, 640), x = cx - w/2;
+  CX.save();
+  CX.fillStyle = 'rgba(8,16,17,.72)'; rr(x, 10, w, 50, 25); CX.fill();
+  CX.strokeStyle = p ? (p.hex + '99') : PAL.line; CX.lineWidth = 2; CX.stroke();
+  CX.restore();
+  txt(label, cx, 27, 20, p ? p.hex : PAL.ink, 'center', '700');
+  txt(sub, cx, 48, 14, PAL.ink2, 'center', '600');
+
+  uiBtn('help', LAY.panelX - 136, 12, 50, 46, '?', 'ghost');
+  uiBtn('sound', LAY.panelX - 78, 12, 74, 46, G.sound ? '♪ on' : '♪ off', 'ghost');
+}
+
+/* ---------- collection du joueur humain ---------- */
+function drawCollection(){
+  const p = G.players[0], L = LAY;
+  const cw = L.collCard, ch = Math.round(cw / CARD_RATIO);
+  txt('VOS CARTES', L.collX + 4, L.stripY + 28, 15, PAL.ink2, 'left', '700');
+  const sc = scoreOf(p);
+  txt(sc.cardPts + ' pts de cartes + ' + sc.bonus + ' de séries', L.collX + 4, L.stripY + 52, 14, PAL.orange, 'left', '600');
+  const cy = L.collY + ch / 2;
+  for (let m = 0; m < 5; m++){
+    const cx = collStackX(m);
+    const list = p.coll.filter(c => (m === 4 ? c.motif < 0 : c.motif === m));
+    if (!list.length){
+      CX.save(); CX.globalAlpha = .22; CX.setLineDash([6, 6]);
+      CX.strokeStyle = PAL.ink; CX.lineWidth = 1.5; rr(cx - cw/2, cy - ch/2, cw, ch, 7); CX.stroke();
+      CX.restore();
+    } else {
+      for (let i = Math.min(list.length, 3) - 1; i >= 0; i--)
+        drawCardAt(list[list.length - 1 - i], cx + i * 4, cy - i * 4, cw, ch, {shadow:i === 0});
+      CX.save();
+      CX.fillStyle = m === 4 ? PAL.orange : MOTIF_COL[m];
+      CX.beginPath(); CX.arc(cx + cw/2 - 4, cy + ch/2 - 4, 15, 0, 6.3); CX.fill();
+      CX.restore();
+      txt(list.length, cx + cw/2 - 4, cy + ch/2 - 3, 16, '#0d1717', 'center', '800');
+    }
+    const bonus = m === 4 ? 0 : serieBonus(list.length);
+    txt(m === 4 ? 'Joker' : MOTIF_NAME[m], cx, cy + ch/2 + 16, 13, PAL.ink2, 'center', '600');
+    if (bonus) txt('+' + bonus, cx, cy + ch/2 + 34, 14, MOTIF_COL[m], 'center', '700');
+  }
+}
+
+/* ---------- zone de dés ---------- */
+function drawTray(){
+  const p = G.players[G.current], L = LAY;
+  CX.save();
+  CX.fillStyle = 'rgba(237,230,206,.05)';
+  rr(L.trayX0, L.stripY + 30, L.trayX1 - L.trayX0, L.strip - 58, 22); CX.fill();
+  CX.strokeStyle = p.id === 0 ? 'rgba(225,102,46,.45)' : PAL.line;
+  CX.lineWidth = 1.5; CX.stroke();
+  CX.restore();
+  txt(p.isAI ? 'DÉS DE ' + p.name.toUpperCase() : 'VOS DÉS',
+      L.trayX0 + 22, L.stripY + 54, 15, PAL.ink2, 'left', '700');
+  if (G.phase === 'ROLL'){
+    for (let i = 0; i < 3; i++){
+      const on = i < (3 - G.rollsLeft);
+      CX.save();
+      CX.fillStyle = on ? PAL.orange : 'rgba(237,230,206,.18)';
+      CX.beginPath(); CX.arc(L.trayX1 - 26 - i * 20, L.stripY + 54, 6, 0, 6.3); CX.fill();
+      CX.restore();
+    }
+  }
+}
+
+/* ---------- panneau droit ---------- */
+function drawPanel(){
+  const L = LAY;
+  CX.save();
+  CX.fillStyle = 'rgba(9,18,19,.72)';
+  rr(L.panelX, 8, L.panelW, VH - 16, 16); CX.fill();
+  CX.strokeStyle = PAL.line; CX.lineWidth = 1.5; CX.stroke();
+  CX.restore();
+  txt('JOUEURS', L.panelX + 22, 36, 15, PAL.ink2, 'left', '700');
+  txt('Tour ' + G.turnCount, L.panelX + L.panelW - 22, 36, 15, PAL.ink2, 'right', '600');
+
+  for (const p of G.players){
+    const r = panelRow(p.id), active = p.id === G.current && G.state === 'play';
+    CX.save();
+    CX.fillStyle = active ? 'rgba(225,102,46,.13)' : 'rgba(237,230,206,.045)';
+    rr(r.x, r.y, r.w, r.h, 13); CX.fill();
+    CX.strokeStyle = active ? PAL.orange : PAL.line; CX.lineWidth = active ? 2 : 1;
+    CX.stroke();
+    CX.fillStyle = p.hex;
+    CX.beginPath(); CX.arc(r.x + 24, r.y + 27, 12, 0, 6.3); CX.fill();
+    CX.restore();
+    txt(p.name, r.x + 44, r.y + 27, 19, active ? PAL.ink : '#cfc9b4', 'left', '700');
+    const sc = scoreOf(p);
+    txt(sc.total, r.x + r.w - 16, r.y + 27, 27, PAL.orange, 'right', '800');
+
+    const chipW = Math.floor((r.w - 34) / 4), chipY = r.y + 50;
+    for (let m = 0; m < 4; m++){
+      const x = r.x + 16 + m * chipW;
+      const n = sc.counts[m];
+      CX.save();
+      CX.globalAlpha = n ? 1 : .28;
+      CX.fillStyle = MOTIF_COL[m];
+      rr(x, chipY, chipW - 8, 26, 7); CX.fill();
+      CX.restore();
+      txt(n, x + (chipW - 8) / 2, chipY + 13, 15, '#121c1d', 'center', '800');
+      if (n >= 2) txt('+' + serieBonus(n), x + (chipW - 8) / 2, chipY + 40, 12, PAL.ink2, 'center', '600');
+    }
+    let bx = r.x + r.w - 18;
+    if (sc.hasJoker){ txt('JOKER', bx, chipY + 40, 13, PAL.cream, 'right', '700'); bx -= 56; }
+    if (G.bonus.holder === p.id || (G.bonus.claim && G.bonus.claim.pid === p.id))
+      txt('DÉ BONUS', bx, chipY + 40, 13, '#fff', 'right', '700');
+  }
+
+  const ly = PANEL_Y0 + G.players.length * panelRH() + 16;
+  CX.save();
+  CX.strokeStyle = PAL.line; CX.beginPath();
+  CX.moveTo(L.panelX + 18, ly - 8); CX.lineTo(L.panelX + L.panelW - 18, ly - 8); CX.stroke();
+  CX.restore();
+  txt('JOURNAL', L.panelX + 22, ly + 12, 14, PAL.ink2, 'left', '700');
+  const maxLines = Math.floor((VH - 40 - (ly + 34)) / 22);
+  const maxChars = Math.floor((L.panelW - 40) / 6.6);
+  for (let i = 0; i < Math.min(G.log.length, maxLines); i++){
+    const e = G.log[i];
+    CX.save(); CX.globalAlpha = clamp(1 - i / (maxLines + 2), .25, 1);
+    let t = e.s; if (t.length > maxChars) t = t.slice(0, maxChars - 1) + '…';
+    txt(t, L.panelX + 22, ly + 38 + i * 22, 14, e.col, 'left', '600');
+    CX.restore();
+  }
+}
+
+/* ---------- dés (couche unique, au-dessus de tout) ---------- */
+function drawAllDice(){
+  for (const s of G.slots) if (s.claim) for (const d of s.claim.dice) drawDieObj(d);
+  if (G.bonus.claim) for (const d of G.bonus.claim.dice) drawDieObj(d);
+  if (G.state === 'play'){
+    const p = G.players[G.current];
+    for (let i = 0; i < p.active; i++){ const d = p.dice[i]; if (d.at === null) drawDieObj(d); }
+  }
+  drawDieObj(G.bonus.bd);
+  for (const pl of G.players) for (const d of pl.dice) if (d.flying && d.at === null) drawDieObj(d);
+}
+function drawFlyingCards(){
+  for (const f of G.flying) drawCardAt(f.card, f.x, f.y, LAY.cw, LAY.ch, {sc:f.sc, rot:f.rot, a:f.a});
+}
+function drawParts(){
+  for (const p of parts){
+    const a = 1 - p.t / p.life;
+    CX.save(); CX.globalAlpha = clamp(a, 0, 1);
+    CX.translate(p.x, p.y); CX.rotate(p.rot);
+    CX.fillStyle = p.col; CX.fillRect(-p.sz/2, -p.sz/2, p.sz, p.sz * 1.6);
+    CX.restore();
+  }
+}
+
+/* ---------- surbrillances ---------- */
+function refreshHL(){
+  G.hl = {ok:new Set(), any:new Set(), active:false};
+  if (G.state !== 'play' || G.phase !== 'CLAIM') return;
+  const p = G.players[G.current];
+  if (p.isAI) return;
+  const avail = p.dice.slice(0, p.active).filter(d => d.at === null);
+  if (!avail.length) return;
+  G.hl.active = true;
+  const sel = avail.filter(d => d.sel);
+  if (sel.length){
+    const vals = sel.map(d => d.value);
+    for (const s of openSlots()) if (canClaim(s, vals, p.id)) G.hl.ok.add(s);
+  }
+  for (const o of buildOptions(avail.map(d => d.value), p)) G.hl.any.add(o.slot);
+}
+
+/* ---------- boutons du tour ---------- */
+function drawButtons(){
+  if (G.state !== 'play') return;
+  const p = G.players[G.current];
+  if (p.isAI) return;
+  const L = LAY, X = L.btnX, W = L.btnW, y = L.stripY + 44;
+  if (G.phase === 'ROLL'){
+    uiBtn('reroll', X, y, W, 62, 'Relancer (' + G.rollsLeft + ')', 'primary', G.rollsLeft > 0);
+    uiBtn('stoproll', X, y + 74, W, 54, 'Passer à la revendication', 'ghost');
+  } else if (G.phase === 'CLAIM'){
+    uiBtn('auto', X, y, W, 54, 'Coup automatique', 'ghost');
+    uiBtn('endturn', X, y + 66, W, 62, 'Terminer le tour', 'primary');
+  } else if (G.phase === 'BONUS'){
+    uiBtn('skipbonus', X, y + 30, W, 58, 'Passer', 'ghost');
+  }
+}
+
+/* ---------- menu ---------- */
+function drawMenu(){
+  CX.save();
+  CX.font = "italic 800 92px 'Trebuchet MS',sans-serif";
+  CX.textAlign = 'center'; CX.textBaseline = 'middle';
+  shadow('rgba(0,0,0,.6)', 24, 0, 8);
+  CX.fillStyle = PAL.orange; CX.fillText("Roll'n Bump", VW/2, 168);
+  noShadow();
+  CX.restore();
+  txt('Lancez. Revendiquez. Délogez.', VW/2, 232, 20, PAL.ink2, 'center', '600');
+
+  txt('JOUEURS', VW/2 - 268, 330, 16, PAL.ink2, 'center', '700');
+  for (let i = 0; i < 3; i++){
+    const n = i + 2;
+    uiBtn('nb' + n, VW/2 - 366 + i * 68, 352, 60, 54, '' + n, G.nbPlayers === n ? 'primary' : 'ghost');
+  }
+  txt('NIVEAU DE L\'ORDINATEUR', VW/2 + 190, 330, 16, PAL.ink2, 'center', '700');
+  for (let i = 0; i < 3; i++){
+    uiBtn('lvl' + i, VW/2 - 24 + i * 148, 352, 140, 54, LEVELS[i].name, G.level === i ? 'primary' : 'ghost');
+  }
+  uiBtn('play', VW/2 - 170, 462, 340, 76, 'Commencer la partie', 'primary');
+
+  const lines = [
+    'Chaque joueur lance ses 5 dés jusqu\'à trois fois, puis pose ses combinaisons sur les cartes du tableau.',
+    'Une carte n\'est encaissée qu\'au début de votre tour suivant : d\'ici là, un adversaire peut vous déloger.',
+    'Combinaison : même figure et total supérieur. Carte Simple : il faut simplement poser plus de dés.',
+    'Fin de partie dès qu\'une pile est vide. Points des cartes + bonus de série par motif.'
+  ];
+  lines.forEach((l, i) => txt(l, VW/2, 594 + i * 34, 17, PAL.ink2, 'center', '600'));
+  txt("Jeu original : Roll'n Bump — Louis-Nicolas Dozois / BOOM Éditions. Adaptation Canvas.",
+      VW/2, 792, 15, 'rgba(237,230,206,.35)', 'center', '600');
+  if (!IMG.cards || !IMG.dice)
+    txt('Astuce : placez spritesheet.png et dés.png à côté du fichier HTML (ou glissez-les sur la page).',
+        VW/2, 828, 15, PAL.orange, 'center', '600');
+}
+
+/* ---------- aide-mémoire ---------- */
+function drawHelp(){
+  CX.save(); CX.fillStyle = 'rgba(5,10,11,.86)'; CX.fillRect(0, 0, VW, VH); CX.restore();
+  const w = clamp(VW * .60, 780, 1020), h = 730, x = (VW - w) / 2, y = (VH - h) / 2;
+  CX.save();
+  CX.fillStyle = 'rgba(20,36,38,.98)'; rr(x, y, w, h, 18); CX.fill();
+  CX.strokeStyle = PAL.orange; CX.lineWidth = 2; CX.stroke();
+  CX.restore();
+  txt('AIDE-MÉMOIRE', x + 36, y + 40, 24, PAL.orange, 'left', '800');
+  const rows = [
+    ['Simple (1 à 6)', '1 pt', 'Un ou plusieurs dés affichant la face de la carte'],
+    ['2 identiques', '2 pts', 'Deux dés de même valeur'],
+    ['Suite de 3', '3 pts', 'Trois dés qui se suivent'],
+    ['3 identiques', '5 pts', 'Trois dés de même valeur'],
+    ['Suite de 4', '7 pts', 'Quatre dés qui se suivent'],
+    ['Suite de 5', '10 pts', 'Cinq dés qui se suivent'],
+    ['4 identiques', '12 pts', 'Quatre dés de même valeur'],
+    ['5 identiques', '15 pts', 'Carte Joker, au centre du tableau']
+  ];
+  rows.forEach((r, i) => {
+    const ry = y + 92 + i * 44;
+    CX.save(); CX.fillStyle = i % 2 ? 'rgba(237,230,206,.04)' : 'transparent';
+    rr(x + 24, ry - 18, w - 48, 38, 8); CX.fill(); CX.restore();
+    txt(r[0], x + 42, ry, 18, PAL.ink, 'left', '700');
+    txt(r[1], x + 268, ry, 18, PAL.orange, 'left', '700');
+    txt(r[2], x + 366, ry, 16, PAL.ink2, 'left', '600');
+  });
+  const notes = [
+    'Déloger une combinaison : même figure, total strictement supérieur.',
+    'Déloger une carte Simple : il faut poser strictement plus de dés.',
+    'Dé bonus : posez-y des dés inutilisés. Le total le plus élevé l\'emporte.',
+    'Le joker s\'ajoute à la série de votre choix (moins de 12 cartes) pour gonfler le bonus.',
+    'Bonus de série : 2→3, 3→6, 4→10, 5→15, 6→21, 7→28, 8→36, 9→45, 10→55, 11→66, 12→78.'
+  ];
+  notes.forEach((n, i) => txt(n, x + 42, y + 470 + i * 34, 16, PAL.ink2, 'left', '600'));
+  uiBtn('closehelp', x + w/2 - 100, y + h - 82, 200, 56, 'Fermer', 'primary');
+}
+
+/* ---------- fin de partie ---------- */
+function drawEnd(){
+  CX.save(); CX.fillStyle = 'rgba(5,10,11,.82)'; CX.fillRect(0, 0, VW, VH); CX.restore();
+  const list = G.players.map(p => ({p, s:scoreOf(p)})).sort((a, b) => b.s.total - a.s.total);
+  const w = clamp(VW * .62, 840, 1080), h = 190 + list.length * 96, x = (VW - w) / 2, y = (VH - h) / 2 - 16;
+  CX.save();
+  CX.fillStyle = 'rgba(20,36,38,.98)'; rr(x, y, w, h, 20); CX.fill();
+  CX.strokeStyle = PAL.orange; CX.lineWidth = 2; CX.stroke();
+  CX.restore();
+  txt('FIN DE PARTIE', x + w/2, y + 46, 32, PAL.orange, 'center', '800');
+  txt(vb(list[0].p, 'l\'emportez avec ' + list[0].s.total + ' points',
+                    'l\'emporte avec ' + list[0].s.total + ' points'),
+      x + w/2, y + 84, 19, PAL.ink, 'center', '600');
+  list.forEach((e, i) => {
+    const ry = y + 122 + i * 96;
+    CX.save();
+    CX.fillStyle = i === 0 ? 'rgba(225,102,46,.14)' : 'rgba(237,230,206,.05)';
+    rr(x + 30, ry, w - 60, 82, 12); CX.fill();
+    CX.strokeStyle = i === 0 ? PAL.orange : PAL.line; CX.lineWidth = 1.5; CX.stroke();
+    CX.fillStyle = e.p.hex; CX.beginPath(); CX.arc(x + 62, ry + 30, 12, 0, 6.3); CX.fill();
+    CX.restore();
+    txt(e.p.name, x + 88, ry + 28, 22, PAL.ink, 'left', '700');
+    let det = e.s.cardPts + ' de cartes  •  ' + e.s.bonus + ' de séries';
+    if (e.s.hasJoker && e.s.jokerMotif >= 0) det += '  (joker sur ' + MOTIF_NAME[e.s.jokerMotif] + ' : +' + e.s.jokerGain + ')';
+    if (e.s.bonusDie) det += '  •  dé bonus ' + e.s.bonusDie;
+    txt(det, x + 88, ry + 56, 16, PAL.ink2, 'left', '600');
+    let cx2 = x + w - 210;
+    for (let m = 0; m < 4; m++){
+      CX.save(); CX.globalAlpha = e.s.counts[m] ? 1 : .25;
+      CX.fillStyle = MOTIF_COL[m]; rr(cx2 + m * 30, ry + 22, 26, 22, 6); CX.fill(); CX.restore();
+      txt(e.s.counts[m], cx2 + m * 30 + 13, ry + 33, 12, '#121c1d', 'center', '800');
+    }
+    txt(e.s.total, x + w - 56, ry + 36, 34, PAL.orange, 'right', '800');
+  });
+  uiBtn('replay', x + w/2 - 120, y + h - 62, 240, 56, 'Rejouer', 'primary');
+}
+
+/* ---------- infobulle d'aide sur les cartes ---------- */
+const TIP_DELAY = 2;                      /* secondes de survol avant affichage */
+function showTip(s){ G.tipSlot = s; G.tipForce = true; }
+function hideTip(){ G.tipSlot = null; G.tipT = 0; G.tipForce = false; }
+function slotAt(pt){
+  for (const s of G.slots)
+    if (s.card && Math.abs(pt.x - s.x) < LAY.cw/2 && Math.abs(pt.y - s.y) < LAY.ch/2) return s;
+  if (Math.abs(pt.x - G.bonus.x) < LAY.cw/2 && Math.abs(pt.y - G.bonus.y) < LAY.ch/2) return G.bonus;
+  return null;
+}
+function wrapText(str, maxW, size, weight){
+  CX.font = (weight || '600') + ' ' + size + "px 'Trebuchet MS','Segoe UI',sans-serif";
+  const words = str.split(' '), out = [];
+  let cur = '';
+  for (const w of words){
+    const t = cur ? cur + ' ' + w : w;
+    if (CX.measureText(t).width > maxW && cur){ out.push(cur); cur = w; }
+    else cur = t;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+function runExample(n){
+  const start = 1 + rnd(0);            /* exemple stable */
+  const a = [];
+  for (let i = 0; i < n; i++) a.push(start + i + (n < 5 ? 1 : 0));
+  return a.join('-');
+}
+function tipContent(slot){
+  const out = [];
+  const add = (t, c, sz, w) => out.push({t, c:c || PAL.ink, s:sz || 13.5, w:w || '600'});
+  const me = G.players[0];
+
+  if (slot === G.bonus){
+    add('Dé bonus', PAL.orange, 19, '800');
+    add('Posez-y le ou les dés qui ne servent à aucune carte : c\'est toujours mieux que de les gaspiller.', PAL.ink);
+    if (slot.claim){
+      const o = G.players[slot.claim.pid];
+      add('Occupé par ' + o.name + ' — total ' + slot.claim.sum + '.', o.hex);
+      add('Pour le reprendre : un total strictement supérieur à ' + slot.claim.sum + '.', PAL.ink);
+    } else add('Libre.', '#79dd8c');
+    add('Vous le récupérez au début de votre prochain tour : il se lance avec vos 5 dés, puis vous pouvez aligner UN dé régulier sur sa face avant de le rendre au tableau.', PAL.ink2, 12.5);
+    add('En fin de partie, son détenteur le lance et ajoute le résultat à son score.', PAL.ink2, 12.5);
+    return out;
+  }
+
+  const c = slot.card, k = c.combo;
+  add(slot.joker ? 'Carte Joker — 5 dés identiques' : k.lbl, PAL.orange, 19, '800');
+  add(c.pts + ' point' + (c.pts > 1 ? 's' : ''), PAL.cream, 15, '700');
+
+  if (k.k === 'simple')
+    add('Posez un ou plusieurs dés affichant ' + k.face + '. Plus vous en posez, plus la carte est difficile à vous reprendre.', PAL.ink);
+  else if (k.k === 'same')
+    add('Posez exactement ' + k.n + ' dés de même valeur (par exemple ' + k.n + ' fois le 4).', PAL.ink);
+  else
+    add('Posez exactement ' + k.n + ' dés qui se suivent (par exemple ' + runExample(k.n) + ').', PAL.ink);
+
+  if (slot.joker){
+    add('Le joker rejoint la série de motif de votre choix (moins de 12 cartes) et gonfle son bonus. Le prendre ne met jamais fin à la partie.', PAL.ink2, 12.5);
+  } else {
+    const n = me.coll.filter(x => x.motif === c.motif).length;
+    if (!n){
+      add('Motif ' + MOTIF_NAME[c.motif] + ' : ce serait votre première. Une deuxième du même motif rapporterait déjà +3 de bonus de série.', MOTIF_COL[c.motif], 13);
+    } else {
+      add('Motif ' + MOTIF_NAME[c.motif] + ' : vous en avez ' + n +
+          (n >= 2 ? ' (bonus de série +' + serieBonus(n) + ')' : '') + '.', MOTIF_COL[c.motif], 13);
+      add('Avec celle-ci : série de ' + (n + 1) + ' → bonus +' + serieBonus(n + 1) +
+          ' (soit +' + (serieBonus(n + 1) - serieBonus(n)) + ' points).', MOTIF_COL[c.motif], 13);
+    }
+  }
+
+  if (slot.claim){
+    const o = G.players[slot.claim.pid];
+    const dv = slot.claim.dice.map(d => d.value).sort((a, b) => a - b).join('-');
+    add(slot.claim.pid === 0 ? 'Vous l\'avez revendiquée avec ' + dv + '.'
+                             : 'Revendiquée par ' + o.name + ' avec ' + dv + '.', o.hex);
+    if (slot.claim.pid === 0){
+      add('Elle est à vous au début de votre prochain tour si personne ne vous déloge d\'ici là.', '#79dd8c');
+      if (canUndo(slot)) add('Cliquez la carte pour reprendre vos dés.', PAL.cream, 13, '700');
+    }
+    else if (k.k === 'simple')
+      add('Pour la déloger : au moins ' + (slot.claim.dice.length + 1) + ' dés affichant ' + k.face + '.', PAL.ink);
+    else
+      add('Pour la déloger : la même figure, avec un total supérieur à ' + slot.claim.sum + '.', PAL.ink);
+  } else add('Libre : personne n\'a posé de dés dessus.', '#79dd8c');
+
+  if (!slot.joker){
+    if (!slot.pile.length) add('Dernière carte de cette pile : dès que quelqu\'un l\'encaisse, la partie s\'arrête.', PAL.orange, 13, '700');
+    else add('Pile : ' + (slot.pile.length + 1) + ' cartes restantes, celle-ci comprise.', PAL.ink2, 12.5);
+  }
+
+  const mine = slot.claim && slot.claim.pid === 0;
+  if (!mine && G.state === 'play' && G.current === 0 && (G.phase === 'CLAIM' || G.phase === 'ROLL')){
+    const avail = me.dice.slice(0, me.active).filter(d => d.at === null);
+    if (avail.length){
+      const opts = buildOptions(avail.map(d => d.value), me).filter(o => o.slot === slot);
+      if (opts.length){
+        opts.sort((a, b) => bits(a.mask) - bits(b.mask));
+        const vals = [];
+        for (let i = 0; i < avail.length; i++) if (opts[0].mask & (1 << i)) vals.push(avail[i].value);
+        add('Vos dés permettent de la prendre : ' + vals.sort((a, b) => a - b).join('-') + '.', '#79dd8c', 13, '700');
+      } else add(G.phase === 'ROLL' ? 'Vos dés actuels ne suffisent pas encore.' : 'Aucune combinaison possible avec vos dés.', PAL.ink2, 13);
+    }
+  }
+  return out;
+}
+function drawTip(slot, alpha){
+  const K = 1.14;                                   /* texte de l'infobulle */
+  const W = 400, pad = 17, maxW = W - pad * 2;
+  const items = [];
+  let h = pad * 2;
+  for (const b of tipContent(slot)){
+    const sz = b.s * K;
+    for (const t of wrapText(b.t, maxW, sz, b.w)){ items.push({t, c:b.c, s:sz, w:b.w}); h += sz + 7; }
+    h += 6;
+  }
+  const anchor = LAY.cw/2;
+  let x = slot.x + anchor + 16;
+  if (x + W > LAY.panelX - 10) x = slot.x - anchor - 16 - W;
+  x = clamp(x, 12, LAY.panelX - W - 10);
+  let y = clamp(slot.y - h/2, 12, VH - h - 12);
+  CX.save();
+  CX.globalAlpha = alpha;
+  shadow('rgba(0,0,0,.6)', 22, 0, 8);
+  CX.fillStyle = 'rgba(14,26,27,.97)';
+  rr(x, y, W, h, 14); CX.fill();
+  noShadow();
+  CX.strokeStyle = 'rgba(225,102,46,.7)'; CX.lineWidth = 2;
+  rr(x, y, W, h, 14); CX.stroke();
+  let cy = y + pad + 4;
+  let prevS = 0;
+  for (const it of items){
+    if (prevS && it.s !== prevS) cy += 6;
+    txt(it.t, x + pad, cy + it.s/2, it.s, it.c, 'left', it.w);
+    cy += it.s + 7;
+    prevS = it.s;
+  }
+  CX.restore();
+}
+
+/* ---------- rendu principal ---------- */
+function draw(){
+  G.hitBtns = [];
+  drawBg();
+  if (G.state === 'menu'){ drawMenu(); return; }
+  refreshHL();
+  for (const s of G.slots) drawSlot(s);
+  drawBonusZone();
+  const claimUI = G.phase === 'CLAIM' && !G.players[G.current].isAI && G.state === 'play';
+  if (claimUI && G.hl && G.hl.active){
+    for (const s of G.slots) if (s.card && !G.hl.any.has(s)) drawVeil(s);
+    for (const s of G.hl.any) if (!G.hl.ok.has(s)) drawHighlight(s, '#f2a65a', false);
+    for (const s of G.hl.ok) drawHighlight(s, '#7ce38e', true);
+  }
+  drawCollection();
+  drawTray();
+  drawPanel();
+  drawTopBar();
+  drawButtons();
+  drawAllDice();
+  drawFlyingCards();
+  drawParts();
+  if (G.tipSlot && G.state === 'play'){
+    const a = G.tipForce ? 1 : clamp((G.tipT - TIP_DELAY) / .18, 0, 1);
+    if (a > 0) drawTip(G.tipSlot, a);
+  }
+  if (G.state === 'over') drawEnd();
+  if (G.showHelp) drawHelp();
+  if (window.innerHeight > window.innerWidth * 1.15){
+    CX.save(); CX.fillStyle = 'rgba(5,10,11,.92)'; CX.fillRect(0, 0, VW, VH); CX.restore();
+    txt('Tournez votre appareil', VW/2, VH/2 - 16, 34, PAL.orange, 'center', '800');
+    txt('Roll\'n Bump se joue en mode paysage.', VW/2, VH/2 + 26, 18, PAL.ink2, 'center', '600');
+  }
+}
+
+/* =======================================================================
+   ENTREES
+   ======================================================================= */
+function toV(e){ return {x:(e.clientX - OX) / SC, y:(e.clientY - OY) / SC}; }
+function hitBtn(pt){
+  for (const b of G.hitBtns)
+    if (pt.x >= b.x && pt.x <= b.x + b.w && pt.y >= b.y && pt.y <= b.y + b.h) return b.id;
+  return null;
+}
+function locked(){ return G.busy || anims.length > 0; }
+
+function tryPlace(slot){
+  const p = G.players[G.current];
+  const avail = p.dice.slice(0, p.active).filter(d => d.at === null);
+  let sel = avail.filter(d => d.sel);
+  if (!sel.length){
+    const opts = buildOptions(avail.map(d => d.value), p).filter(o => o.slot === slot);
+    if (!opts.length){ SFX.bad(); return false; }
+    /* on pose le strict nécessaire : un seul dé sur une carte Simple libre,
+       de quoi laisser les autres dés pour les cartes jumelles du tableau.
+       À nombre de dés égal, on garde la combinaison la plus solide. */
+    opts.sort((a, b) => (bits(a.mask) - bits(b.mask)) || (b.val - a.val));
+    const m = opts[0].mask;
+    sel = [];
+    for (let i = 0; i < avail.length; i++) if (m & (1 << i)) sel.push(avail[i]);
+  } else if (!canClaim(slot, sel.map(d => d.value), p.id)){
+    SFX.bad();
+    avail.forEach(d => d.sel = false);
+    return false;
+  }
+  placeClaim(p, slot, sel);
+  return true;
+}
+
+async function autoPlay(){
+  const p = G.players[G.current];
+  const avail = p.dice.slice(0, p.active).filter(d => d.at === null);
+  const plan = bestPlan(avail.map(d => d.value), p);
+  if (!plan.length){ SFX.bad(); return; }
+  for (const o of plan){
+    const dice = [];
+    for (let i = 0; i < avail.length; i++) if (o.mask & (1 << i)) dice.push(avail[i]);
+    if (dice.some(d => d.at !== null)) continue;
+    await placeClaim(p, o.slot, dice);
+    await wait(170);
+  }
+}
+
+function onButton(id){
+  if (id === 'sound'){ G.sound = !G.sound; if (G.sound) ac(); return; }
+  if (id === 'help'){ G.showHelp = true; return; }
+  if (id === 'closehelp'){ G.showHelp = false; return; }
+  if (G.state === 'menu'){
+    if (id === 'play'){ ac(); newGame(); }
+    else if (id.slice(0, 2) === 'nb') G.nbPlayers = +id.slice(2);
+    else if (id.slice(0, 3) === 'lvl') G.level = +id.slice(3);
+    return;
+  }
+  if (id === 'replay'){ G.state = 'menu'; return; }
+  if (locked()) return;
+  const p = G.players[G.current];
+  if (p.isAI) return;
+  if (id === 'reroll'){ G.busy = true; setTimeout(() => G.busy = false, 80); resolveUI('reroll'); }
+  else if (id === 'stoproll') resolveUI('stop');
+  else if (id === 'endturn'){ p.dice.forEach(d => d.sel = false); resolveUI('end'); }
+  else if (id === 'skipbonus') resolveUI(null);
+  else if (id === 'auto') autoPlay();
+}
+
+function onDie(p, d){
+  if (G.phase === 'ROLL'){
+    if (G.rollsLeft <= 0) return;
+    d.lock = !d.lock; clack(.12);
+  } else if (G.phase === 'CLAIM'){
+    if (d.isBonus) return;
+    d.sel = !d.sel; blip(d.sel ? 660 : 440, .07, 'triangle', .07);
+  } else if (G.phase === 'BONUS'){
+    if (d.isBonus) return;
+    resolveUI({die:d});
+  }
+}
+
+function onDown(pt){
+  const id = hitBtn(pt);
+  if (id){ hideTip(); onButton(id); return; }
+  if (G.showHelp){ G.showHelp = false; return; }
+  if (G.state !== 'play') return;
+  hideTip();
+  const p = G.players[G.current];
+  const act = !p.isAI && !locked();
+  if (act){
+    const dice = p.dice.slice(0, p.active).filter(d => d.at === null);
+    if (p.hasBonus) dice.push(G.bonus.bd);
+    for (const d of dice){
+      const r = (d.sz || 52) * .62;
+      if (Math.abs(pt.x - d.x) < r && Math.abs(pt.y - (d.y - (d.z || 0))) < r){ onDie(p, d); return; }
+    }
+  }
+  const slot = slotAt(pt);
+  if (act && G.phase === 'CLAIM' && slot){
+    if (canUndo(slot)){ undoPlace(slot); return; }
+    if (tryPlace(slot)) return;
+    showTip(slot); return;            /* clic sans effet : on explique la carte */
+  }
+  if (slot){ showTip(slot); return; }  /* survol tactile / tour de l'ordinateur */
+  if (act && G.phase === 'CLAIM') p.dice.forEach(d => d.sel = false);
+}
+
+CV.addEventListener('pointermove', e => {
+  const pt = toV(e);
+  G.mouse = pt;
+  G.hover = hitBtn(pt);
+  const s = G.state === 'play' ? slotAt(pt) : null;
+  if (s !== G.tipSlot){ G.tipSlot = s; G.tipT = 0; G.tipForce = false; }
+});
+CV.addEventListener('pointerdown', e => { e.preventDefault(); onDown(toV(e)); });
+CV.addEventListener('pointerleave', () => { G.hover = null; hideTip(); });
+window.addEventListener('keydown', e => {
+  if (e.key === 'h' || e.key === 'H') G.showHelp = !G.showHelp;
+  if (e.key === 'm' || e.key === 'M') G.sound = !G.sound;
+  if (e.key === 'Escape') G.showHelp = false;
+  if (e.key === ' '){
+    e.preventDefault();
+    if (G.state === 'menu'){ ac(); newGame(); return; }
+    if (locked()) return;
+    const p = G.players[G.current];
+    if (p.isAI) return;
+    if (G.phase === 'ROLL' && G.rollsLeft > 0) onButton('reroll');
+    else if (G.phase === 'ROLL') onButton('stoproll');
+    else if (G.phase === 'CLAIM') onButton('endturn');
+    else if (G.phase === 'BONUS') onButton('skipbonus');
+  }
+});
+
+/* =======================================================================
+   BOUCLE
+   ======================================================================= */
+let lastT = performance.now();
+function frame(t){
+  const dt = Math.min(.05, (t - lastT) / 1000);
+  lastT = t;
+  stepAnims(dt); stepParts(dt);
+  if (G.tipSlot && !G.tipForce) G.tipT += dt;
+  for (const s of G.slots) if (s.glow > 0) s.glow = Math.max(0, s.glow - dt * 1.6);
+  if (G.bonus && G.bonus.glow > 0) G.bonus.glow = Math.max(0, G.bonus.glow - dt * 1.6);
+  CX.setTransform(DPR, 0, 0, DPR, 0, 0);
+  CX.clearRect(0, 0, window.innerWidth, window.innerHeight);
+  CX.fillStyle = '#0b1415';
+  CX.fillRect(0, 0, window.innerWidth, window.innerHeight);
+  CX.translate(OX, OY); CX.scale(SC, SC);
+  try { draw(); } catch(err){ console.error(err); }
+  requestAnimationFrame(frame);
+}
+
+/* =======================================================================
+   INIT
+   ======================================================================= */
+G.bonus = {idx:'bonus', cell:0, x:800, y:400, claim:null, holder:-1, glow:0,
+           bd:{id:-1, owner:-1, isBonus:true, value:d6(), x:800, y:400,
+               z:0, rot:0, scale:1, sz:60, at:null, sel:false, lock:false, flying:false}};
+G.hl = {ok:new Set(), any:new Set()};
+resize();
+initThreat();
+loadAssets();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
