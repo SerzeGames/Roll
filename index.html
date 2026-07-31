@@ -1239,6 +1239,19 @@ async function doBonusAdjust(p){
   await moveDie(G.bonus.bd, bp.x, bp.y, .45, 60, DSZ_BONUS);
 }
 
+/* En fin de tour, les dés qui n'ont servi à rien partent d'eux-mêmes sur le
+   dé bonus : ils reviennent de toute façon au tour suivant, donc les y poser
+   ne coûte rien et peut rapporter. Silencieux quand c'est impossible :
+   dé bonus déjà à soi, lancé ce tour-ci, ou total adverse plus élevé. */
+async function autoBonus(p){
+  if (G.over || !G.bonus) return false;
+  const free = p.dice.slice(0, p.active).filter(d => d.at === null);
+  if (!free.length) return false;
+  if (!canClaim(G.bonus, free.map(d => d.value), p.id)) return false;
+  await placeClaim(p, G.bonus, free);
+  return true;
+}
+
 async function doClaim(p){
   G.phase = 'CLAIM';
   G.undoStack = [];
@@ -1251,15 +1264,23 @@ async function doClaim(p){
                ? randomPlan(act.map(d => d.value), p)
                : bestPlan(act.map(d => d.value), p);
     if (!plan.length){ logMsg(p.name + ' ne peut rien revendiquer', PAL.ink2); await wait(600); }
+    /* si le plan pose des dés sur le dé bonus, autant y mettre tout le reste :
+       le total en est d'autant plus dur à surenchérir */
+    let used = 0;
+    for (const o of plan) used |= o.mask;
+    const bo = plan.find(o => o.slot === G.bonus);
+    if (bo) bo.mask |= (~used) & ((1 << act.length) - 1);
     for (const o of plan){
       const dice = [];
       for (let i = 0; i < act.length; i++) if (o.mask & (1 << i)) dice.push(act[i]);
-      if (dice.some(d => d.at !== null)) continue;
+      if (!dice.length || dice.some(d => d.at !== null)) continue;
       await placeClaim(p, o.slot, dice);
       await wait(240);
     }
+    await autoBonus(p);
   } else {
     await waitUI();
+    await autoBonus(p);
   }
 }
 
@@ -2004,6 +2025,7 @@ function drawHelp(){
     'Déloger une combinaison : même figure, total strictement supérieur.',
     'Déloger une carte Simple : il faut poser strictement plus de dés.',
     'Dé bonus : posez-y des dés inutilisés. Le total le plus élevé l\'emporte.',
+    'En fin de tour, vos dés restants y sont placés automatiquement si c\'est possible.',
     'Le joker s\'ajoute à la série de votre choix (moins de 12 cartes) pour gonfler le bonus.',
     'Bonus de série : 2→3, 3→6, 4→10, 5→15, 6→21, 7→28, 8→36, 9→45, 10→55, 11→66, 12→78.'
   ];
@@ -2086,7 +2108,7 @@ function tipContent(slot){
 
   if (slot === G.bonus){
     add('Dé bonus', PAL.orange, 19, '800');
-    add('Posez-y le ou les dés qui ne servent à aucune carte : c\'est toujours mieux que de les gaspiller.', PAL.ink);
+    add('Posez-y le ou les dés qui ne servent à aucune carte. En fin de tour, ceux qu\'il vous reste y sont placés automatiquement quand c\'est permis.', PAL.ink);
     if (slot.claim){
       const o = G.players[slot.claim.pid];
       add('Occupé par ' + o.name + ' — total ' + slot.claim.sum + '.', o.hex);
